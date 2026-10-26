@@ -1,0 +1,27 @@
+# systemd unit for running the bot without Docker.
+# 1. Adjust User and the paths below (the project is assumed to be in /opt/hacks-helper).
+# 2. sudo cp deploy/systemd/hacks-helper.service /etc/systemd/system/
+# 3. sudo systemctl daemon-reload && sudo systemctl enable --now hacks-helper
+# Logs: journalctl -u hacks-helper -f   (and logs/bot.log)
+
+[Unit]
+Description=hacks-helper Telegram bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hacksbot
+WorkingDirectory=/opt/hacks-helper
+ExecStart=/opt/hacks-helper/venv/bin/python main.py
+Restart=always
+RestartSec=10
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/hacks-helper/data /opt/hacks-helper/logs
+
+[Install]
+WantedBy=multi-user.target
