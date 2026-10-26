@@ -79,7 +79,7 @@ class DaySchedule:
 
     def describe(self) -> str:
         if self.mode == MODE_ALL:
-            return "можно весь день"
+            return "весь день"
         if self.mode == MODE_NONE:
             return "нельзя"
         return ", ".join(str(w) for w in self.windows)

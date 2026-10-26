@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiosqlite
 
@@ -181,6 +181,10 @@ class ChatsRepo:
                 ("DELETE FROM chats WHERE chat_id = ?", (old_chat_id,)),
                 (
                     "UPDATE OR IGNORE hackathons SET chat_id = ? WHERE chat_id = ?",
+                    (new_chat_id, old_chat_id),
+                ),
+                (
+                    "UPDATE popups SET chat_id = ? WHERE chat_id = ?",
                     (new_chat_id, old_chat_id),
                 ),
                 (
@@ -640,6 +644,29 @@ class RemindersRepo:
         )
 
 
+class PopupsRepo:
+    """Texts of short answers; a button in the chat refers to them by id."""
+
+    TTL = timedelta(days=30)
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def add(self, chat_id: int, text: str) -> int:
+        now = utcnow()
+        await self.db.execute("DELETE FROM popups WHERE created_at < ?", (to_db(now - self.TTL),))
+        return await self.db.execute(
+            "INSERT INTO popups (chat_id, text, created_at) VALUES (?, ?, ?)",
+            (chat_id, text, to_db(now)),
+        )
+
+    async def get(self, popup_id: int, chat_id: int) -> str | None:
+        row = await self.db.fetchone(
+            "SELECT text FROM popups WHERE id = ? AND chat_id = ?", (popup_id, chat_id)
+        )
+        return row["text"] if row else None
+
+
 class Storage:
     """Facade bundling all repositories."""
 
@@ -652,3 +679,4 @@ class Storage:
         self.tasks = TasksRepo(db)
         self.availability = AvailabilityRepo(db)
         self.reminders = RemindersRepo(db)
+        self.popups = PopupsRepo(db)

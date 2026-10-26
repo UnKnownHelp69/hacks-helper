@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 ACTIVE_STATUSES = {"member", "administrator", "creator", "restricted"}
 
-SENDER_CHAT_REFUSAL = "Команды от имени группы или канала не принимаются, напишите от своего имени"
+SENDER_CHAT_REFUSAL = "Пишите команды от своего имени, не от имени группы или канала"
 ADMIN_ONLY_TEXT = "Эта команда доступна только администраторам бота"
 
 MigrateCallback = Callable[[int, int], Awaitable[None]]

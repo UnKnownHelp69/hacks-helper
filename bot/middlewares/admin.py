@@ -9,6 +9,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from bot.middlewares.security import ADMIN_ONLY_TEXT
+from bot.respond import respond
 
 
 class AdminOnlyMiddleware(BaseMiddleware):
@@ -26,7 +27,11 @@ class AdminOnlyMiddleware(BaseMiddleware):
         if data.get("is_admin") is True:
             return await handler(event, data)
         if isinstance(event, Message):
-            await event.reply(ADMIN_ONLY_TEXT)
+            ctx = data.get("ctx")
+            if ctx is not None:
+                await respond(event, ADMIN_ONLY_TEXT, ctx)
+            else:
+                await event.reply(ADMIN_ONLY_TEXT)
         elif isinstance(event, CallbackQuery):
             await event.answer(ADMIN_ONLY_TEXT, show_alert=True)
         return None
