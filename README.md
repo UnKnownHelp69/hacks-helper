@@ -1,6 +1,6 @@
 # hacks-helper
 
-**English:** a self-hosted Telegram bot that coordinates a small team during hackathons:
+**Description** a self-hosted Telegram bot that coordinates a small team during hackathons:
 deadlines and reminders, participants, GitHub issues as tasks with automatic status
 tracking, availability-aware pings, an archive with statistics. Python 3.11+, aiogram 3,
 SQLite, long polling. Interface language is Russian. Built to be safe in a public repo:
