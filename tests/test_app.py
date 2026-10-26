@@ -59,3 +59,12 @@ def test_settings_parsing(monkeypatch, tmp_path):
     monkeypatch.setenv("BOT_ADMIN_IDS", "abc")
     with pytest.raises(ConfigError):
         load_settings(tmp_path / "missing.env")
+
+
+def test_tokens_are_redacted_from_logs():
+    from bot.logging_setup import redact
+
+    fake_tg = "1234567890:" + "A" * 35
+    fake_gh = "github_pat_" + "B" * 40
+    text = redact(f"url=https://api.telegram.org/bot{fake_tg}/getMe token={fake_gh}")
+    assert fake_tg not in text and fake_gh not in text

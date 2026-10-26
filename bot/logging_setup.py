@@ -9,9 +9,10 @@ from pathlib import Path
 
 # Telegram bot tokens look like "123456789:AA...", GitHub tokens start with ghp_/github_pat_.
 _SECRET_PATTERNS = [
-    re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b"),
-    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    # No word boundary on the left: tokens also appear inside URLs ("/bot<token>/").
+    re.compile(r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}"),
+    re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
 ]
 
 
