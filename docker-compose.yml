@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    image: hacks-helper:latest
+    container_name: hacks-helper
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /app/data/bot.db
+      LOG_FILE: /app/logs/bot.log
+    volumes:
+      - bot-data:/app/data
+      - bot-logs:/app/logs
+
+volumes:
+  bot-data:
+  bot-logs:

@@ -1,0 +1,21 @@
+[project]
+name = "hacks-helper"
+version = "1.0.0"
+description = "Telegram bot that coordinates a team during hackathons"
+requires-python = ">=3.11"
+license = "MIT"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"bot/texts.py" = ["E501"]
