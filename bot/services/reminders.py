@@ -74,7 +74,7 @@ class ReminderService:
             await self.storage.reminders.add_deferred(hack.id, milestone, at, user_id, when)
         lines = [reminder_header(hack, milestone, now, tz), *plan.render_lines()]
         if not members:
-            lines.append("Участники ещё не добавлены")
+            lines.append("Участников нет")
         log.info("Reminder %s/%s (offsets %s) sent", hack.slug, milestone, due)
         await self.messenger.send(hack.chat_id, "\n".join(lines))
 
@@ -115,7 +115,7 @@ class ReminderService:
             plan = await self.pinger.plan(hack.chat_id, user_ids, tz=tz, now=now)
             if not plan.mentions and not plan.not_in_group:
                 continue
-            lines = [reminder_header(hack, milestone, now, tz) + " — отложенное напоминание"]
+            lines = [reminder_header(hack, milestone, now, tz)]
             if plan.mentions:
                 lines.append("👥 " + ", ".join(plan.mentions))
             lines.extend(f"🚪 {name} нет в группе" for name in plan.not_in_group)

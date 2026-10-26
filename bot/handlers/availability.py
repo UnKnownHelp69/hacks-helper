@@ -10,21 +10,20 @@ from aiogram.types import Message
 from bot.context import AppContext
 from bot.errors import UserError
 from bot.handlers.base import usage
+from bot.handlers.views import avail_view
+from bot.respond import respond
 from bot.services.args import Token, parse_command, reply_target, resolve_user_token
 from bot.services.availability import (
     WEEKDAY_NAMES,
-    describe_schedule,
-    deserialize_schedule,
     parse_day_value,
     parse_days,
     serialize_day,
 )
-from bot.services.timeutil import tz_label
 
 router = Router(name="availability")
 router.message.filter(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 
-OTHERS_ADMIN_ONLY = "Менять расписание другого человека может только администратор бота"
+OTHERS_ADMIN_ONLY = "Чужое расписание меняет только админ бота"
 
 
 async def _target(message: Message, ctx: AppContext, is_admin: bool, token: Token | None) -> int:
@@ -46,17 +45,6 @@ async def _target(message: Message, ctx: AppContext, is_admin: bool, token: Toke
     return user_id
 
 
-async def _show(message: Message, ctx: AppContext, user_id: int, prefix: str = "") -> None:
-    schedule = deserialize_schedule(await ctx.storage.availability.get_raw(user_id))
-    tz = await ctx.zone(message.chat.id)
-    name = await ctx.directory.plain(message.chat.id, user_id)
-    note = " (по умолчанию: можно всегда)" if schedule.is_default else ""
-    await message.reply(
-        f"{prefix}🕒 Когда можно пинговать {name}{note}, время {tz_label(tz)}:\n"
-        f"{describe_schedule(schedule)}"
-    )
-
-
 @router.message(Command("avail"))
 async def cmd_avail(message: Message, ctx: AppContext, is_admin: bool) -> None:
     cmd = parse_command(message)
@@ -75,7 +63,9 @@ async def cmd_avail(message: Message, ctx: AppContext, is_admin: bool) -> None:
         user_id = target.id
     else:
         user_id = message.from_user.id
-    await _show(message, ctx, user_id)
+    text = await avail_view(ctx, message.chat.id, user_id)
+    personal = "avail" if user_id == message.from_user.id and not cmd.tokens else None
+    await respond(message, text, ctx, personal=personal)
 
 
 @router.message(Command("avail_set"))
@@ -93,7 +83,8 @@ async def cmd_avail_set(message: Message, ctx: AppContext, is_admin: bool) -> No
     value = parse_day_value("".join(t.text for t in tokens[1:]))
     await ctx.storage.availability.set_days(user_id, {day: serialize_day(value) for day in days})
     changed = ", ".join(WEEKDAY_NAMES[d] for d in days)
-    await _show(message, ctx, user_id, prefix=f"✅ Обновлено: {changed} — {value.describe()}\n")
+    text = await avail_view(ctx, message.chat.id, user_id)
+    await respond(message, f"✅ {changed}: {value.describe()}\n{text}", ctx)
 
 
 @router.message(Command("avail_reset"))
@@ -106,4 +97,4 @@ async def cmd_avail_reset(message: Message, ctx: AppContext, is_admin: bool) -> 
     if user_id != message.from_user.id and not is_admin:
         raise UserError(OTHERS_ADMIN_ONLY)
     await ctx.storage.availability.reset(user_id)
-    await _show(message, ctx, user_id, prefix="✅ Расписание сброшено.\n")
+    await respond(message, f"✅ {await avail_view(ctx, message.chat.id, user_id)}", ctx)

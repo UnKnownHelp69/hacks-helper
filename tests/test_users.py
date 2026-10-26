@@ -177,7 +177,7 @@ async def test_partial_resolution_reports_unknown(directory, storage, fake_bot):
 async def test_display_uses_current_username_and_cache(directory, storage, fake_bot):
     await storage.users.upsert(OTHER_ID, "old", "Bob", None)
     fake_bot.set_member(ALLOWED_CHAT, user(OTHER_ID, "fresh", "Bob"))
-    assert await directory.plain(ALLOWED_CHAT, OTHER_ID) == "<code>fresh</code>"
+    assert await directory.plain(ALLOWED_CHAT, OTHER_ID) == "fresh"
     info = await directory.lookup(ALLOWED_CHAT, OTHER_ID)
     assert info.mention == "@fresh"
     assert fake_bot.get_member_calls == 1  # cached
@@ -218,11 +218,11 @@ async def test_ping_plan_skips_left_and_defers_unavailable(directory, storage, f
         ALLOWED_CHAT, [1, 2, 3, 4, 5], tz=MSK, now=now, deadline=deadline
     )
     assert plan.mentions == ["@here"]
-    assert plan.not_in_group == ["<code>gone</code>", "<code>banned</code>"]
+    assert plan.not_in_group == ["gone", "banned"]
     assert plan.deferred == {4: datetime(2026, 10, 26, 9, 0, tzinfo=MSK)}
-    assert plan.skipped_names == ["<code>never</code>"]
+    assert plan.skipped_names == ["never"]
     rendered = "\n".join(plan.render_lines())
-    assert "<code>gone</code> нет в группе" in rendered
+    assert "gone нет в группе" in rendered
     assert "@gone" not in rendered and "@sleepy" not in rendered
 
 
@@ -234,4 +234,4 @@ async def test_window_after_deadline_skips_ping(directory, storage, fake_bot):
     plan = await Pinger(directory, storage.availability).plan(
         ALLOWED_CHAT, [4], tz=MSK, now=now, deadline=deadline
     )
-    assert plan.deferred == {} and plan.skipped_names == ["<code>sleepy</code>"]
+    assert plan.deferred == {} and plan.skipped_names == ["sleepy"]

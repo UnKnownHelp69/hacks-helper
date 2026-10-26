@@ -9,18 +9,16 @@ from aiogram import Router
 from aiogram.filters import ExceptionTypeFilter
 from aiogram.types import ChatMemberUpdated, ErrorEvent, Message
 
+from bot.context import AppContext
 from bot.errors import UserError
 from bot.middlewares.security import status_value
+from bot.respond import fits_popup, html_to_plain, respond
 
 log = logging.getLogger(__name__)
 
 router = Router(name="events")
 
-NOT_ADMIN_WARNING = (
-    "⚠️ Я не администратор этой группы. Сделайте меня администратором "
-    "без дополнительных прав (все переключатели выключены): иначе я не смогу надёжно "
-    "проверять участников и узнавать об их входе и выходе."
-)
+NOT_ADMIN_WARNING = "⚠️ Сделайте меня администратором группы, все права можно выключить"
 
 
 @router.my_chat_member()
@@ -35,7 +33,7 @@ async def on_my_chat_member(event: ChatMemberUpdated) -> None:
             log.warning("Could not warn chat %s: %s", event.chat.id, exc)
     elif status == "administrator":
         try:
-            await event.answer("✅ Права администратора получены. Справка: /help")
+            await event.answer("✅ Я администратор. Команды: /help")
         except Exception as exc:
             log.warning("Could not notify chat %s: %s", event.chat.id, exc)
 
@@ -50,18 +48,22 @@ def _event_message(event: ErrorEvent) -> Message | None:
 
 
 @router.error(ExceptionTypeFilter(UserError))
-async def on_user_error(event: ErrorEvent) -> None:
+async def on_user_error(event: ErrorEvent, ctx: AppContext | None = None) -> None:
     assert isinstance(event.exception, UserError)
     text = f"❌ {event.exception.message}"
-    if event.update.callback_query:
-        with contextlib.suppress(Exception):
-            await event.update.callback_query.answer()
-    message = _event_message(event)
-    if message is None:
-        return
     try:
-        if event.update.message:
-            await message.reply(text)
+        callback = event.update.callback_query
+        if callback is not None:
+            if fits_popup(text):
+                await callback.answer(html_to_plain(text), show_alert=True)
+                return
+            with contextlib.suppress(Exception):
+                await callback.answer()
+        message = _event_message(event)
+        if message is None:
+            return
+        if event.update.message and ctx is not None:
+            await respond(message, text, ctx)
         else:
             await message.answer(text)
     except Exception as exc:
@@ -79,6 +81,6 @@ async def on_unexpected_error(event: ErrorEvent) -> None:
     if message is None:
         return
     try:
-        await message.answer("⚠️ Внутренняя ошибка. Подробности записаны в лог бота.")
+        await message.answer("⚠️ Внутренняя ошибка, подробности в логе бота")
     except Exception as exc:
         log.warning("Could not deliver an error message: %s", exc)

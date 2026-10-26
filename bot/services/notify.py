@@ -58,9 +58,9 @@ class PingPlan:
         if self.mentions:
             lines.append("👥 " + ", ".join(self.mentions))
         if self.deferred_names:
-            lines.append("⏸ Напомню позже, сейчас не беспокоить: " + ", ".join(self.deferred_names))
+            lines.append("⏸ Позже: " + ", ".join(self.deferred_names))
         if self.skipped_names:
-            lines.append("🔕 Не беспокоить до дедлайна: " + ", ".join(self.skipped_names))
+            lines.append("🔕 Без пинга: " + ", ".join(self.skipped_names))
         lines.extend(f"🚪 {name} нет в группе" for name in self.not_in_group)
         return lines
 

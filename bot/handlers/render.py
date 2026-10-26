@@ -32,17 +32,18 @@ def dates_block(hack: Hackathon, tz: ZoneInfo) -> str:
     return (
         f"Регистрация до: {format_dt(hack.registration_end, tz)}\n"
         f"Начало: {format_dt(hack.start_at, tz)}\n"
-        f"Конец: {format_dt(hack.end_at, tz)}\n"
-        f"(время: {escape(tz_label(tz))})"
+        f"Конец: {format_dt(hack.end_at, tz)} ({escape(tz_label(tz))})"
     )
 
 
-def left_text(hack: Hackathon, now: datetime, tz: ZoneInfo) -> str:
+def left_text(hack: Hackathon, now: datetime, tz: ZoneInfo, *, with_slug: bool = True) -> str:
     nxt = next_milestone(hack, now)
+    prefix = f"<b>{escape(hack.slug)}</b>: " if with_slug else ""
     if nxt is None:
-        return f"🏁 <b>{escape(hack.slug)}</b>: хакатон завершён"
+        return f"🏁 {prefix}хакатон завершён"
+    until = MILESTONE_UNTIL[nxt.milestone]
     return (
-        f"⏳ <b>{escape(hack.slug)}</b>: {MILESTONE_UNTIL[nxt.milestone]} осталось "
+        f"⏳ {prefix}{until if with_slug else until.capitalize()} осталось "
         f"<b>{format_duration(nxt.remaining)}</b> "
         f"({format_dt(nxt.at, tz)} {escape(tz_label(tz))})\n"
         f"Сейчас: {current_phase(hack, now)}"
@@ -65,11 +66,11 @@ async def hackathon_card(ctx: AppContext, hack: Hackathon, now: datetime) -> str
         dates_block(hack, tz),
     ]
     if hack.is_active:
-        lines.append(left_text(hack, now, tz))
+        lines.append(left_text(hack, now, tz, with_slug=False))
     else:
         lines.append(f"Место: {place_text(hack)}")
     members = await ctx.storage.hackathons.members(hack.id)
-    lines.append(f"Репозиторий: {repo_text(hack)}")
+    lines.append(f"Репо: {repo_text(hack)}")
     lines.append(f"Участники ({len(members)}): {await members_text(ctx, hack)}")
     materials = materials_lines(hack)
     if materials:

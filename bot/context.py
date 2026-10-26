@@ -46,10 +46,10 @@ class AppContext:
 
     async def hackathon(self, chat_id: int, slug: str | None) -> Hackathon:
         if not slug:
-            raise UserError("Укажите хакатон (короткое имя). Список: /hacks")
+            raise UserError("Укажите хакатон, список: /hacks")
         hack = await self.storage.hackathons.get(chat_id, slug.lower())
         if hack is None:
-            raise UserError(f"Хакатон «{escape(slug)}» не найден. Список: /hacks, архив: /history")
+            raise UserError(f"Хакатон {escape(slug)} не найден, список: /hacks")
         return hack
 
     def remember_issue_query(self, query: IssueQuery) -> str:

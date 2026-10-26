@@ -115,6 +115,15 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (hackathon_id, milestone, user_id)
     );
     """,
+    # 2: short command answers shown in a popup behind a button
+    """
+    CREATE TABLE popups (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id     INTEGER NOT NULL,
+        text        TEXT NOT NULL,
+        created_at  TEXT NOT NULL
+    );
+    """,
 ]
 
 LATEST_VERSION = len(MIGRATIONS)

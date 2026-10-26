@@ -10,10 +10,12 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from bot.context import AppContext
-from bot.db.models import HACK_ACTIVE, Hackathon
+from bot.db.models import Hackathon
 from bot.errors import UserError
-from bot.handlers.base import parse_issue_number, reply, usage
+from bot.handlers.base import parse_issue_number, usage
 from bot.handlers.render import task_line
+from bot.handlers.views import tasks_view
+from bot.respond import respond
 from bot.services.args import parse_command, reply_target, resolve_user_token
 from bot.services.formatting import issue_link
 from bot.services.task_status import STATUS_TITLES
@@ -21,7 +23,7 @@ from bot.services.task_status import STATUS_TITLES
 router = Router(name="tasks")
 router.message.filter(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 
-OTHERS_ADMIN_ONLY = "Назначать и снимать задачи других участников могут только администраторы бота"
+OTHERS_ADMIN_ONLY = "Задачи других назначает и снимает только админ бота"
 
 
 async def _parse_task_command(
@@ -60,7 +62,7 @@ async def _parse_task_command(
 @router.message(Command("task"))
 async def cmd_task(message: Message, ctx: AppContext, is_admin: bool) -> None:
     hack, user_id, number = await _parse_task_command(
-        message, ctx, is_admin, "/task <хак> [@user] <номер issue>"
+        message, ctx, is_admin, "/task <хак> [@user] <номер>"
     )
     result = await ctx.tasks.assign(hack, user_id, number)
     assert result.task is not None
@@ -71,19 +73,19 @@ async def cmd_task(message: Message, ctx: AppContext, is_admin: bool) -> None:
         f"({STATUS_TITLES[result.task.status]})"
     ]
     lines.extend(f"⚠️ {w}" for w in result.warnings)
-    await reply(message, "\n".join(lines))
+    await respond(message, "\n".join(lines), ctx)
 
 
 @router.message(Command("untask"))
 async def cmd_untask(message: Message, ctx: AppContext, is_admin: bool) -> None:
     hack, user_id, number = await _parse_task_command(
-        message, ctx, is_admin, "/untask <хак> [@user] <номер issue>"
+        message, ctx, is_admin, "/untask <хак> [@user] <номер>"
     )
     warnings = await ctx.tasks.unassign(hack, user_id, number)
     name = await ctx.directory.plain(message.chat.id, user_id)
-    lines = [f"Задача #{number} снята с {name}"]
+    lines = [f"✅ #{number} снята с {name}"]
     lines.extend(f"⚠️ {w}" for w in warnings)
-    await reply(message, "\n".join(lines))
+    await respond(message, "\n".join(lines), ctx)
 
 
 @router.message(Command("tasks"))
@@ -112,31 +114,23 @@ async def cmd_tasks(message: Message, ctx: AppContext, is_admin: bool) -> None:
         user_id = caller
 
     if hack is not None and user_id is None:
-        await reply(message, await _hackathon_tasks(ctx, hack))
+        await respond(message, await _hackathon_tasks(ctx, hack), ctx)
         return
     assert user_id is not None
-    hacks = [hack] if hack else await ctx.storage.hackathons.list(message.chat.id, HACK_ACTIVE)
-    by_id = {h.id: h for h in hacks}
-    tasks = await ctx.storage.tasks.active_for_user(user_id, list(by_id))
-    name = await ctx.directory.plain(message.chat.id, user_id)
-    scope = f" в {escape(hack.slug)}" if hack else ""
-    if not tasks:
-        await message.reply(f"У {name} нет активных задач{scope}")
-        return
-    lines = [f"📝 Задачи {name}{scope}:"]
-    for task in tasks:
-        lines.append(task_line(task, with_hack=None if hack else by_id[task.hackathon_id].slug))
-    await reply(message, "\n".join(lines))
+    text = await tasks_view(ctx, message.chat.id, user_id, hack)
+    # "/tasks" alone: a reusable "my tasks" button computed for whoever presses it.
+    personal = "tasks" if user_id == caller and hack is None and not tokens else None
+    await respond(message, text, ctx, personal=personal)
 
 
 async def _hackathon_tasks(ctx: AppContext, hack: Hackathon) -> str:
     tasks = await ctx.storage.tasks.active_for_hackathon(hack.id)
     if not tasks:
-        return f"В {escape(hack.slug)} нет активных задач"
+        return f"📝 {escape(hack.slug)}: задач нет"
     grouped: dict[int, list] = {}
     for task in tasks:
         grouped.setdefault(task.user_id, []).append(task)
-    lines = [f"📝 <b>{escape(hack.slug)}</b>: активные задачи ({len(tasks)})"]
+    lines = [f"📝 <b>{escape(hack.slug)}</b>: задач {len(tasks)}"]
     for user_id, user_tasks in grouped.items():
         lines.append(f"\n<b>{await ctx.directory.plain(hack.chat_id, user_id)}</b>")
         lines.extend(task_line(t) for t in user_tasks)

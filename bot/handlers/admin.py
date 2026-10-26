@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from html import escape
@@ -19,9 +20,10 @@ from aiogram.types import (
 from bot.context import AppContext
 from bot.db.database import utcnow
 from bot.errors import UserError
-from bot.handlers.base import reply, usage, validate_slug
+from bot.handlers.base import usage, validate_slug
 from bot.handlers.render import hackathon_card
 from bot.middlewares.admin import AdminOnlyMiddleware
+from bot.respond import respond
 from bot.services.args import parse_command, reply_target, resolve_user_tokens
 from bot.services.github import GitHubNotConfigured, normalize_repo
 from bot.services.schedule_logic import MILESTONE_TITLES, parse_milestone, validate_dates
@@ -55,19 +57,15 @@ async def cmd_hack_new(message: Message, ctx: AppContext) -> None:
     validate_dates(registration_end, start_at, end_at)
     title = cmd.rest(7) or None
     if title and len(title) > 100:
-        raise UserError("Слишком длинное название (максимум 100 символов)")
+        raise UserError("Название длиннее 100 символов")
     if await ctx.storage.hackathons.get(message.chat.id, slug):
-        raise UserError(f"Хакатон «{escape(slug)}» уже существует (возможно, в архиве)")
+        raise UserError(f"{escape(slug)} уже есть (возможно, в архиве)")
     hack = await ctx.storage.hackathons.create(
         message.chat.id, slug, title, registration_end, start_at, end_at
     )
     log.info("Hackathon %s created by %s", slug, message.from_user.id if message.from_user else "?")
     card = await hackathon_card(ctx, hack, utcnow())
-    await reply(
-        message,
-        f"✅ Хакатон создан.\n\n{card}\n\nДальше: /repo {escape(slug)} owner/repo, "
-        f"/add {escape(slug)} @участники",
-    )
+    await respond(message, f"✅ Создан\n{card}", ctx)
 
 
 @router.message(Command("hack_date"))
@@ -89,10 +87,11 @@ async def cmd_hack_date(message: Message, ctx: AppContext) -> None:
     await ctx.storage.hackathons.update_dates(
         hack.id, dates["registration_end"], dates["start"], dates["end"]
     )
-    note = "" if hack.is_active else "\nХакатон в архиве: дата исправлена только в истории."
-    await message.reply(
-        f"✅ {escape(hack.slug)}: {MILESTONE_TITLES[milestone]} — {format_dt(value, tz)}. "
-        f"Напоминания пересчитаны.{note}"
+    note = "" if hack.is_active else " (архив)"
+    await respond(
+        message,
+        f"✅ {escape(hack.slug)}: {MILESTONE_TITLES[milestone]} {format_dt(value, tz)}{note}",
+        ctx,
     )
 
 
@@ -100,15 +99,15 @@ async def cmd_hack_date(message: Message, ctx: AppContext) -> None:
 async def cmd_hack_title(message: Message, ctx: AppContext) -> None:
     cmd = parse_command(message)
     if len(cmd.tokens) < 1:
-        raise usage("/hack_title <хак> <название> (или «-», чтобы убрать)")
+        raise usage("/hack_title <хак> <название> | -")
     hack = await ctx.hackathon(message.chat.id, cmd.tokens[0].text)
     title = cmd.rest(1)
     if not title or title in _CLEAR_WORDS:
         title = None
     elif len(title) > 100:
-        raise UserError("Слишком длинное название (максимум 100 символов)")
+        raise UserError("Название длиннее 100 символов")
     await ctx.storage.hackathons.update_fields(hack.id, title=title)
-    await message.reply(f"✅ Название {escape(hack.slug)}: {escape(title or 'не задано')}")
+    await respond(message, f"✅ {escape(hack.slug)}: {escape(title or 'без названия')}", ctx)
 
 
 @router.message(Command("hack_del"))
@@ -126,8 +125,7 @@ async def cmd_hack_del(message: Message, ctx: AppContext) -> None:
         ]
     )
     await message.reply(
-        f"Удалить хакатон <b>{escape(hack.display_name)}</b> со всеми участниками, задачами "
-        "и статистикой? Это необратимо. (Завершённые хакатоны лучше оставить в архиве.)",
+        f"Удалить <b>{escape(hack.display_name)}</b> вместе с задачами и статистикой?",
         reply_markup=keyboard,
     )
 
@@ -143,23 +141,25 @@ async def cb_hack_del(callback: CallbackQuery, ctx: AppContext) -> None:
         return
     if answer != "y":
         await callback.answer("Отменено")
-        await message.edit_text("Удаление отменено")  # type: ignore[union-attr]
+        with contextlib.suppress(Exception):
+            await message.delete()  # type: ignore[union-attr]
         return
     await ctx.storage.hackathons.delete(hack.id)
     log.info("Hackathon %s deleted by %s", hack.slug, callback.from_user.id)
-    await callback.answer("Удалено")
-    await message.edit_text(f"🗑 Хакатон {escape(hack.slug)} удалён")  # type: ignore[union-attr]
+    await callback.answer(f"{hack.slug} удалён", show_alert=True)
+    with contextlib.suppress(Exception):
+        await message.delete()  # type: ignore[union-attr]
 
 
 @router.message(Command("repo"))
 async def cmd_repo(message: Message, ctx: AppContext) -> None:
     words = [t.text for t in parse_command(message).tokens]
     if len(words) != 2:
-        raise usage("/repo <хак> owner/repo   (или «-», чтобы отвязать)")
+        raise usage("/repo <хак> owner/repo | -")
     hack = await ctx.hackathon(message.chat.id, words[0])
     if words[1] in _CLEAR_WORDS:
         await ctx.storage.hackathons.update_fields(hack.id, repo=None)
-        await message.reply(f"Репозиторий отвязан от {escape(hack.slug)}")
+        await respond(message, f"✅ {escape(hack.slug)}: репозиторий отвязан", ctx)
         return
     repo = normalize_repo(words[1])
     if not ctx.github.configured:
@@ -167,16 +167,13 @@ async def cmd_repo(message: Message, ctx: AppContext) -> None:
     data = await ctx.github.get_repo(repo)
     repo = str(data.get("full_name") or repo)
     await ctx.storage.hackathons.update_fields(hack.id, repo=repo)
-    await message.reply(
-        f"✅ Репозиторий <code>{escape(repo)}</code> привязан к {escape(hack.slug)}. "
-        f"Issues: /issues {escape(hack.slug)}"
-    )
+    await respond(message, f"✅ {escape(hack.slug)}: {escape(repo)}", ctx)
 
 
 async def _member_targets(message: Message, ctx: AppContext) -> tuple[str, list[int], list[str]]:
     cmd = parse_command(message)
     if not cmd.tokens:
-        raise usage("/add <хак> @user1 @user2 … (или ответом на сообщение: /add <хак>)")
+        raise usage("/add <хак> @user1 @user2 … или ответом: /add <хак>")
     slug = cmd.tokens[0].text
     user_tokens = cmd.tokens[1:]
     assert message.from_user is not None
@@ -191,9 +188,7 @@ async def _member_targets(message: Message, ctx: AppContext) -> tuple[str, list[
         return slug, ids, errors
     target = reply_target(message)
     if target is None:
-        raise UserError(
-            "Укажите участников (@username, упоминание) или ответьте на сообщение человека"
-        )
+        raise UserError("Укажите @username или ответьте на сообщение человека")
     await ctx.directory.remember(target)
     return slug, [target.id], []
 
@@ -211,11 +206,11 @@ async def cmd_add(message: Message, ctx: AppContext) -> None:
             already.append(name)
     lines = []
     if added:
-        lines.append(f"✅ Добавлены в {escape(hack.slug)}: {', '.join(added)}")
+        lines.append(f"✅ {escape(hack.slug)} +{', '.join(added)}")
     if already:
-        lines.append(f"Уже участвуют: {', '.join(already)}")
+        lines.append(f"Уже в составе: {', '.join(already)}")
     lines.extend(f"⚠️ {err}" for err in errors)
-    await reply(message, "\n".join(lines) or "Никто не добавлен")
+    await respond(message, "\n".join(lines) or "Никто не добавлен", ctx)
 
 
 @router.message(Command("remove"))
@@ -232,49 +227,47 @@ async def cmd_remove(message: Message, ctx: AppContext) -> None:
             missing.append(name)
     lines = []
     if removed:
-        lines.append(
-            f"✅ Убраны из {escape(hack.slug)} (их активные задачи сняты): {', '.join(removed)}"
-        )
+        lines.append(f"✅ {escape(hack.slug)} −{', '.join(removed)} (задачи сняты)")
     if missing:
-        lines.append(f"Не участвовали: {', '.join(missing)}")
+        lines.append(f"Не в составе: {', '.join(missing)}")
     lines.extend(f"⚠️ {err}" for err in errors)
-    await reply(message, "\n".join(lines) or "Никто не убран")
+    await respond(message, "\n".join(lines) or "Никто не убран", ctx)
 
 
 @router.message(Command("place"))
 async def cmd_place(message: Message, ctx: AppContext) -> None:
     words = [t.text for t in parse_command(message).tokens]
     if len(words) != 2:
-        raise usage("/place <хак> <место> или /place <хак> нет")
+        raise usage("/place <хак> <место|нет>")
     hack = await ctx.hackathon(message.chat.id, words[0])
     if hack.is_active:
-        raise UserError("Место указывается после завершения хакатона")
+        raise UserError("Место ставится после завершения хакатона")
     raw = words[1].lower()
     if raw in {"нет", "без", "0", "-", "none"}:
         place = 0
     elif raw.isdigit() and 0 < int(raw) < 10000:
         place = int(raw)
     else:
-        raise UserError("Место — положительное число или «нет»")
+        raise UserError("Место: число или «нет»")
     await ctx.storage.hackathons.update_fields(hack.id, place=place)
     text = "без места" if place == 0 else f"{place} место"
-    await message.reply(f"✅ {escape(hack.slug)}: {text}")
+    await respond(message, f"✅ {escape(hack.slug)}: {text}", ctx)
 
 
 async def _set_link(message: Message, ctx: AppContext, field_name: str, label: str) -> None:
     words = [t.text for t in parse_command(message).tokens]
     if len(words) != 2:
-        raise usage(f"/{field_name} <хак> <ссылка> (или «-», чтобы удалить)")
+        raise usage(f"/{field_name} <хак> <ссылка> | -")
     hack = await ctx.hackathon(message.chat.id, words[0])
     value = words[1]
     if value in _CLEAR_WORDS:
         await ctx.storage.hackathons.update_fields(hack.id, **{_LINK_FIELDS[field_name]: None})
-        await message.reply(f"{label} для {escape(hack.slug)} удалена")
+        await respond(message, f"✅ {escape(hack.slug)}: {label} удалена", ctx)
         return
     if not _URL_RE.match(value) or len(value) > 500:
-        raise UserError("Нужна ссылка, начинающаяся с http:// или https://")
+        raise UserError("Нужна ссылка http:// или https://")
     await ctx.storage.hackathons.update_fields(hack.id, **{_LINK_FIELDS[field_name]: value})
-    await message.reply(f"✅ {label} для {escape(hack.slug)} сохранена")
+    await respond(message, f"✅ {escape(hack.slug)}: {label} сохранена", ctx)
 
 
 _LINK_FIELDS = {"site": "site_url", "orgchat": "org_chat_url"}
@@ -282,21 +275,19 @@ _LINK_FIELDS = {"site": "site_url", "orgchat": "org_chat_url"}
 
 @router.message(Command("site"))
 async def cmd_site(message: Message, ctx: AppContext) -> None:
-    await _set_link(message, ctx, "site", "Ссылка на сайт")
+    await _set_link(message, ctx, "site", "ссылка на сайт")
 
 
 @router.message(Command("orgchat"))
 async def cmd_orgchat(message: Message, ctx: AppContext) -> None:
-    await _set_link(message, ctx, "orgchat", "Ссылка на чат организаторов")
+    await _set_link(message, ctx, "orgchat", "ссылка на чат организаторов")
 
 
 @router.message(Command("spec"))
 async def cmd_spec(message: Message, ctx: AppContext) -> None:
     words = [t.text for t in parse_command(message).tokens]
     if not words:
-        raise usage(
-            "/spec <хак> <ссылка> | файл с подписью /spec <хак> | ответ /spec <хак> на файл"
-        )
+        raise usage("/spec <хак> <ссылка> | файл с подписью /spec <хак>")
     hack = await ctx.hackathon(message.chat.id, words[0])
     document = message.document or (
         message.reply_to_message.document if message.reply_to_message else None
@@ -308,42 +299,36 @@ async def cmd_spec(message: Message, ctx: AppContext) -> None:
             spec_file_name=document.file_name,
             spec_url=None,
         )
-        await message.reply(
-            f"✅ ТЗ для {escape(hack.slug)}: файл «{escape(document.file_name or 'без имени')}». "
-            f"Показать: /links {escape(hack.slug)}"
-        )
+        name = escape(document.file_name or "файл")
+        await respond(message, f"✅ {escape(hack.slug)}: ТЗ — {name}", ctx)
         return
     if len(words) != 2:
-        raise UserError(
-            "Пришлите ссылку (/spec &lt;хак&gt; &lt;ссылка&gt;), отправьте файл с подписью "
-            "/spec &lt;хак&gt; или ответьте /spec &lt;хак&gt; на сообщение с файлом"
-        )
+        raise usage("/spec <хак> <ссылка> | файл с подписью /spec <хак>")
     value = words[1]
     if value in _CLEAR_WORDS:
         await ctx.storage.hackathons.update_fields(
             hack.id, spec_url=None, spec_file_id=None, spec_file_name=None
         )
-        await message.reply(f"ТЗ для {escape(hack.slug)} удалено")
+        await respond(message, f"✅ {escape(hack.slug)}: ТЗ удалено", ctx)
         return
     if not _URL_RE.match(value) or len(value) > 500:
-        raise UserError("Нужна ссылка, начинающаяся с http:// или https://")
+        raise UserError("Нужна ссылка http:// или https://")
     await ctx.storage.hackathons.update_fields(
         hack.id, spec_url=value, spec_file_id=None, spec_file_name=None
     )
-    await message.reply(f"✅ ТЗ для {escape(hack.slug)}: ссылка сохранена")
+    await respond(message, f"✅ {escape(hack.slug)}: ТЗ сохранено", ctx)
 
 
 @router.message(Command("set_tz"))
 async def cmd_set_tz(message: Message, ctx: AppContext) -> None:
     words = [t.text for t in parse_command(message).tokens]
     if len(words) != 1:
-        raise usage("/set_tz <IANA-название>, например /set_tz Europe/Moscow")
+        raise usage("/set_tz Europe/Moscow")
     tz = get_zone(words[0])
     await ctx.storage.chats.set_timezone(message.chat.id, tz.key)
     now = utcnow()
-    await message.reply(
-        f"✅ Часовой пояс чата: <b>{escape(tz.key)}</b> ({utc_offset_label(tz, now)}), "
-        f"сейчас {format_dt(now, tz)}.\n"
-        "Даты хакатонов хранятся в UTC и не сдвигаются; напоминания и окна доступности "
-        "теперь считаются в новом поясе."
+    await respond(
+        message,
+        f"✅ {escape(tz.key)} ({utc_offset_label(tz, now)}), сейчас {format_dt(now, tz)}",
+        ctx,
     )

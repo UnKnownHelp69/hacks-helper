@@ -42,10 +42,7 @@ class TaskResult:
 
 def require_repo(hack: Hackathon) -> str:
     if not hack.repo:
-        raise UserError(
-            f"У хакатона {escape(hack.slug)} не указан репозиторий. "
-            f"Админ может привязать его: /repo {escape(hack.slug)} owner/repo"
-        )
+        raise UserError(f"У {escape(hack.slug)} нет репозитория (/repo)")
     return hack.repo
 
 
@@ -84,46 +81,35 @@ class TaskService:
     ) -> bool:
         """Set the GitHub assignee if a login is linked. Returns True if assigned."""
         if not login:
-            warnings.append(
-                "У исполнителя не привязан GitHub-логин, assignee в GitHub не поставлен "
-                "(/link_github)"
-            )
+            warnings.append("GitHub не привязан, assignee не поставлен (/link_github)")
             return False
         if login.lower() in {a.lower() for a in issue.assignees}:
             return True
         try:
             updated = await self.github.add_assignees(repo, issue.number, [login])
         except GitHubError as exc:
-            warnings.append(f"Не удалось поставить assignee в GitHub: {exc.message}")
+            warnings.append(f"assignee не поставлен: {exc.message}")
             return False
         if login.lower() not in {a.lower() for a in updated.assignees}:
-            warnings.append(
-                f"GitHub не принял исполнителя {escape(login)} "
-                "(возможно, у него нет доступа к репозиторию)"
-            )
+            warnings.append(f"GitHub не принял {escape(login)}: нет доступа к репо?")
             return False
         return True
 
     async def assign(self, hack: Hackathon, user_id: int, issue_number: int) -> TaskResult:
         repo = require_repo(hack)
         if not hack.is_active:
-            raise UserError("Хакатон уже в архиве")
+            raise UserError("Хакатон в архиве")
         if not await self.storage.hackathons.is_member(hack.id, user_id):
-            raise UserError(
-                f"Пользователь не участвует в хакатоне {escape(hack.slug)}. "
-                f"Сначала: /add {escape(hack.slug)} @user"
-            )
+            raise UserError(f"Не участвует в {escape(hack.slug)} (/add)")
         existing = await self.storage.tasks.get(hack.id, user_id, issue_number)
         if existing and existing.active:
-            raise UserError(f"Задача #{issue_number} уже назначена этому участнику")
+            raise UserError(f"#{issue_number} уже назначена")
         try:
             issue = await self.github.get_issue(repo, issue_number)
         except GitHubNotFound:
-            raise UserError(
-                f"Issue #{issue_number} не найден в {escape(repo)} (или нет доступа)"
-            ) from None
+            raise UserError(f"#{issue_number} не найден в {escape(repo)}") from None
         if issue.state == "closed":
-            raise UserError(f"Issue #{issue_number} уже закрыт")
+            raise UserError(f"#{issue_number} уже закрыт")
         warnings: list[str] = []
         login = await self.storage.github_links.get_login(user_id)
         assigned = await self._ensure_github_assignee(repo, issue, login, warnings)
@@ -143,7 +129,7 @@ class TaskService:
     async def unassign(self, hack: Hackathon, user_id: int, issue_number: int) -> list[str]:
         task = await self.storage.tasks.get(hack.id, user_id, issue_number)
         if task is None or not task.active:
-            raise UserError(f"У этого участника нет активной задачи #{issue_number}")
+            raise UserError(f"Задачи #{issue_number} нет")
         await self.storage.tasks.delete(task.id)
         warnings: list[str] = []
         login = await self.storage.github_links.get_login(user_id)
@@ -151,7 +137,7 @@ class TaskService:
             try:
                 await self.github.remove_assignees(hack.repo, issue_number, [login])
             except GitHubError as exc:
-                warnings.append(f"Не удалось снять assignee в GitHub: {exc.message}")
+                warnings.append(f"assignee не снят: {exc.message}")
         return warnings
 
     async def create_issue(
@@ -159,11 +145,11 @@ class TaskService:
     ) -> TaskResult:
         repo = require_repo(hack)
         if not hack.is_active:
-            raise UserError("Хакатон уже в архиве")
+            raise UserError("Хакатон в архиве")
         if assignee_id is not None and not await self.storage.hackathons.is_member(
             hack.id, assignee_id
         ):
-            raise UserError(f"Исполнитель не участвует в хакатоне {escape(hack.slug)}")
+            raise UserError(f"Исполнитель не участвует в {escape(hack.slug)}")
         issue = await self.github.create_issue(repo, title, body)
         if assignee_id is None:
             return TaskResult(None, issue)
@@ -238,8 +224,8 @@ class TaskService:
                 except GitHubNotFound:
                     await self.storage.tasks.delete(task.id)
                     lines.append(
-                        f"❔ #{task.issue_number} больше не найден в репозитории, задача снята "
-                        f"с {await self.pinger.directory.plain(hack.chat_id, task.user_id)}"
+                        f"❔ #{task.issue_number} не найден в репо, снята с "
+                        f"{await self.pinger.directory.plain(hack.chat_id, task.user_id)}"
                     )
                     continue
             link = issue_link(issue.number, issue.title, issue.html_url)
@@ -251,7 +237,7 @@ class TaskService:
                 elif not assigned and task.seen_assigned:
                     await self.storage.tasks.delete(task.id)
                     name = await self.pinger.directory.plain(hack.chat_id, task.user_id)
-                    lines.append(f"↩️ {link}: assignee снят в GitHub, задача снята с {name}")
+                    lines.append(f"↩️ {link}: снята с {name} (assignee снят в GitHub)")
                     continue
             status = await self.issue_status(repo, issue)
             if status != task.status:

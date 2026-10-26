@@ -14,6 +14,7 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (
+    AnswerCallbackQuery,
     GetChatMember,
     GetMe,
     LeaveChat,
@@ -35,7 +36,7 @@ from aiogram.types import (
 import bot.handlers
 from bot import app as app_module
 from bot.app import build_context
-from bot.handlers import admin, availability, common, events, github, hackathons, tasks
+from bot.handlers import admin, availability, common, events, github, hackathons, popups, tasks
 from bot.services.github import GitHubClient
 from tests.conftest import ADMIN_ID, ALLOWED_CHAT, FOREIGN_CHAT, USER_ID, make_settings
 
@@ -110,7 +111,7 @@ def github_handler(request: httpx.Request) -> httpx.Response:
 
 def build_dispatcher(ctx):
     """aiogram routers can be attached only once: reload handler modules for fresh routers."""
-    for module in (admin, availability, common, events, github, hackathons, tasks):
+    for module in (admin, availability, common, events, github, hackathons, popups, tasks):
         importlib.reload(module)
     importlib.reload(bot.handlers)
     importlib.reload(app_module)
@@ -158,82 +159,184 @@ async def send(app, text: str, sender: User = ADMIN, chat_id: int = ALLOWED_CHAT
     await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), message=message))
 
 
+async def shown(app, presser: User) -> str:
+    """What ``presser`` sees for the last answer: the popup text or the chat message."""
+    session = app["session"]
+    last = [m for m in session.requests if isinstance(m, SendMessage)][-1]
+    markup = last.reply_markup
+    data = markup.inline_keyboard[0][0].callback_data if markup else None
+    if not data or not data.startswith(("pop:", "my:")):
+        return last.text
+    message = Message(
+        message_id=next(_ids),
+        date=datetime(2026, 10, 26, tzinfo=UTC),
+        chat=Chat(id=last.chat_id, type="supergroup"),
+        text=last.text,
+    )
+    callback = CallbackQuery(
+        id=str(next(_ids)), from_user=presser, chat_instance="x", data=data, message=message
+    )
+    before = len(session.requests)
+    await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), callback_query=callback))
+    new = session.requests[before:]
+    for method in new:
+        if isinstance(method, AnswerCallbackQuery) and method.show_alert:
+            return method.text
+    # too long for a popup: posted to the chat instead
+    return "\n".join(m.text for m in new if isinstance(m, SendMessage))
+
+
 async def test_full_flow(app):
     session = app["session"]
 
     # Alice introduces herself so the bot learns her user_id
     await send(app, "/me", ALICE)
-    assert f"<code>{USER_ID}</code>" in session.last_text()
+    assert session.last_text() == "👀 /me"  # the answer itself is hidden behind a button
+    assert f"id: {USER_ID}" in await shown(app, ALICE)
 
     # non-admin cannot create hackathons
     await send(app, "/hack_new h2026 01.12.2026 23:59 05.12.2026 10:00 07.12.2026 18:00", ALICE)
-    assert session.last_text() == "Эта команда доступна только администраторам бота"
+    assert await shown(app, ALICE) == "Эта команда доступна только администраторам бота"
 
     await send(app, "/hack_new h2026 01.12.2026 23:59 05.12.2026 10:00 07.12.2026 18:00 Хакатон")
-    assert "Хакатон создан" in session.last_text()
+    assert "✅ Создан" in await shown(app, ADMIN)
     hack = await app["storage"].hackathons.get(ALLOWED_CHAT, "h2026")
     assert hack is not None and hack.start_at == datetime(2026, 12, 5, 7, 0, tzinfo=UTC)
 
     await send(app, "/hack_new bad 05.12.2026 10:00 01.12.2026 23:59 07.12.2026 18:00")
-    assert "не позже начала" in session.last_text()
+    assert "не позже начала" in await shown(app, ADMIN)
 
     await send(app, "/add h2026 @alice_tg @ghost_user")
-    text = session.last_text()
-    assert "Добавлены" in text and "Я ещё не знаю @ghost_user" in text
+    text = await shown(app, ADMIN)
+    assert "+alice_tg" in text and "Я ещё не знаю @ghost_user" in text
     assert await app["storage"].hackathons.members(hack.id) == [USER_ID]
 
     await send(app, "/repo h2026 https://github.com/team/project")
-    assert "привязан" in session.last_text()
+    assert "team/project" in await shown(app, ADMIN)
 
     await send(app, "/link_github alice-gh", ALICE)
-    assert "привязан" in session.last_text()
+    assert "GitHub alice-gh" in await shown(app, ALICE)
 
     await send(app, "/task h2026 12", ALICE)  # self-assignment
-    assert "#12 Авторизация" in session.last_text()
+    assert "#12 Авторизация" in await shown(app, ALICE)
     tasks = await app["storage"].tasks.active_for_hackathon(hack.id)
     assert [(t.user_id, t.issue_number) for t in tasks] == [(USER_ID, 12)]
 
     await send(app, "/task h2026 @admin_user 12", ALICE)  # assigning others: admin only
-    assert "только администраторы" in session.last_text()
+    assert "только админ" in await shown(app, ALICE)
 
     await send(app, "/tasks h2026", ALICE)
-    assert "alice_tg" in session.last_text() and "@alice_tg" not in session.last_text()
+    text = await shown(app, ALICE)
+    assert "alice_tg" in text and "@alice_tg" not in text
 
-    await send(app, "/issues h2026", ALICE)
+    # "/tasks" alone gives a "my tasks" button computed for whoever presses it
+    await send(app, "/tasks", ALICE)
+    assert "#12 Авторизация" in await shown(app, ALICE)
+    assert "admin_user: задач нет" in await shown(app, ADMIN)
+
+    await send(app, "/issues h2026", ALICE)  # links + paging: always a chat message
     assert "#12 Авторизация" in session.last_text()
 
     await send(app, "/issue_new h2026 me Новая\nОписание", ALICE)
-    assert "Создан" in session.last_text()
+    assert "Новая" in await shown(app, ALICE)
 
     await send(app, "/avail_set ср 09:00-21:00", ALICE)
-    assert "Ср: 09:00–21:00" in session.last_text()
+    assert "Ср: 09:00–21:00" in await shown(app, ALICE)
 
     await send(app, "/avail_set ср нет @admin_user", ALICE)
-    assert "только администратор" in session.last_text()
+    assert "только админ" in await shown(app, ALICE)
 
     await send(app, "/set_tz Asia/Yekaterinburg", ALICE)
-    assert session.last_text() == "Эта команда доступна только администраторам бота"
+    assert await shown(app, ALICE) == "Эта команда доступна только администраторам бота"
     await send(app, "/set_tz Asia/Yekaterinburg")
     await send(app, "/tz", ALICE)
-    assert "Asia/Yekaterinburg" in session.last_text() and "UTC+05:00" in session.last_text()
+    text = await shown(app, ALICE)
+    assert "Asia/Yekaterinburg" in text and "UTC+05:00" in text
 
     await send(app, "/left h2026", ALICE)
-    assert "до окончания регистрации" in session.last_text()
+    assert "до окончания регистрации" in await shown(app, ALICE)
 
     await send(app, "/hacks", ALICE)
-    assert "Хакатон (h2026)" in session.last_text()
+    assert "Хакатон (h2026)" in await shown(app, ALICE)
 
     await send(app, "/hack h2026", ALICE)
-    assert "05.12.2026 12:00" in session.last_text()  # shown in the new time zone
+    assert "05.12.2026 12:00" in await shown(app, ALICE)  # shown in the new time zone
 
     await send(app, "/help@hacks_bot", ALICE)
-    assert any("🔒" in t for t in session.texts())
+    assert "🔒" in session.last_text()
 
     await send(app, "/place h2026 2")
-    assert "после завершения" in session.last_text()
+    assert "после завершения" in await shown(app, ADMIN)
 
     await send(app, "/hack nope", ALICE)
-    assert "не найден" in session.last_text()
+    assert "не найден" in await shown(app, ALICE)
+
+    # names are plain text: <code> renders as empty boxes in some Linux clients
+    assert not any("<code>alice_tg" in t for t in session.texts())
+
+
+async def test_long_answers_go_to_chat(app):
+    session = app["session"]
+    storage = app["storage"]
+    await send(app, "/me", ALICE)
+    await send(app, "/hack_new h1 01.12.2026 23:59 05.12.2026 10:00 07.12.2026 18:00")
+    hack = await storage.hackathons.get(ALLOWED_CHAT, "h1")
+    await storage.hackathons.add_member(hack.id, USER_ID)
+    for number in range(1, 8):
+        await storage.tasks.upsert_active(
+            hack.id,
+            USER_ID,
+            number,
+            f"Длинное название задачи {number}",
+            "",
+            "not_started",
+            "bot",
+            False,
+        )
+    await send(app, "/tasks", ALICE)
+    last = [m for m in session.requests if isinstance(m, SendMessage)][-1]
+    assert last.reply_markup is None and "Длинное название задачи 7" in last.text
+
+    # an old "my tasks" button whose answer has grown too long posts it to the chat
+    popup_owner = await shown_after_button(app, "my:tasks", ALICE)
+    assert "Длинное название задачи 1" in popup_owner
+
+
+async def shown_after_button(app, data: str, presser: User) -> str:
+    message = Message(
+        message_id=next(_ids),
+        date=datetime(2026, 10, 26, tzinfo=UTC),
+        chat=Chat(id=ALLOWED_CHAT, type="supergroup"),
+        text="👀",
+    )
+    callback = CallbackQuery(
+        id=str(next(_ids)), from_user=presser, chat_instance="x", data=data, message=message
+    )
+    before = len(app["session"].requests)
+    await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), callback_query=callback))
+    new = app["session"].requests[before:]
+    assert any(isinstance(m, AnswerCallbackQuery) and not m.show_alert for m in new)
+    return "\n".join(m.text for m in new if isinstance(m, SendMessage))
+
+
+async def test_expired_popup(app):
+    text = await shown_after_button_alert(app, "pop:999999")
+    assert text == "Ответ устарел, повторите команду"
+
+
+async def shown_after_button_alert(app, data: str) -> str:
+    message = Message(
+        message_id=next(_ids),
+        date=datetime(2026, 10, 26, tzinfo=UTC),
+        chat=Chat(id=ALLOWED_CHAT, type="supergroup"),
+        text="👀",
+    )
+    callback = CallbackQuery(
+        id=str(next(_ids)), from_user=ALICE, chat_instance="x", data=data, message=message
+    )
+    await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), callback_query=callback))
+    answers = [m for m in app["session"].requests if isinstance(m, AnswerCallbackQuery)]
+    return answers[-1].text
 
 
 async def test_reply_and_spec_file(app):
@@ -262,7 +365,7 @@ async def test_reply_and_spec_file(app):
         caption_entities=[MessageEntity(type="bot_command", offset=0, length=5)],
     )
     await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), message=message))
-    assert "tz.pdf" in session.last_text()
+    assert "tz.pdf" in await shown(app, ADMIN)
     await send(app, "/site h1 https://hack.example.org")
     await send(app, "/links h1", ALICE)
     document = [m for m in session.requests if isinstance(m, SendDocument)][-1]
@@ -277,7 +380,7 @@ async def test_foreign_chat_and_private(app):
     assert session.texts() == []
 
     await send(app, "/whoami", ALICE, chat_id=USER_ID)
-    assert session.last_text() == f"Ваш Telegram user_id: <code>{USER_ID}</code>"
+    assert session.last_text() == f"Ваш user_id: <code>{USER_ID}</code>"
     count = len(session.texts())
     await send(app, "/hacks", ALICE, chat_id=USER_ID)
     await send(app, "/me", ALICE, chat_id=USER_ID)

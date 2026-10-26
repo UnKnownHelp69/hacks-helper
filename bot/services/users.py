@@ -56,9 +56,12 @@ class MemberInfo:
 
     @property
     def plain(self) -> str:
-        """Name without pinging: username in <code>, or the escaped full name."""
+        """Name without pinging: username without @, or the escaped full name.
+
+        Plain text on purpose: <code> renders as empty boxes in some Linux clients.
+        """
         if self.username:
-            return f"<code>{escape(self.username)}</code>"
+            return escape(self.username)
         return escape(self.full_name)
 
     @property

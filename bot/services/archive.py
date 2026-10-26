@@ -51,10 +51,8 @@ class ArchiveService:
             total, _ = await self.storage.tasks.closed_counts(hack.id)
             slug = escape(hack.slug)
             text = [
-                f"🏁 Хакатон <b>{escape(hack.display_name)}</b> завершён и перенесён в архив.",
-                f"Закрыто issues (по задачам бота): {total}.",
-                f"Укажите место: /place {slug} &lt;место&gt; или /place {slug} нет",
-                f"История: /history {slug}",
+                f"🏁 <b>{escape(hack.display_name)}</b> завершён, закрыто issues: {total}",
+                f"Место: /place {slug} &lt;место|нет&gt;",
             ]
             if sync_lines:
                 text = [*sync_lines, "", *text]

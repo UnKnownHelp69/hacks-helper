@@ -185,6 +185,8 @@ async def _run_bot(settings: Settings, storage: Storage) -> None:
         default=DefaultBotProperties(
             parse_mode=ParseMode.HTML,
             link_preview=LinkPreviewOptions(is_disabled=True),
+            # Answer even if the command message was deleted meanwhile.
+            allow_sending_without_reply=True,
         ),
     )
     ctx = build_context(settings, bot, storage)
@@ -202,9 +204,8 @@ async def _run_bot(settings: Settings, storage: Storage) -> None:
         )
         await ctx.messenger.send(
             new_chat_id,
-            f"ℹ️ Группа стала супергруппой, её новый id: <code>{new_chat_id}</code>. "
-            "Данные перенесены. Администратору бота: замените старый id на новый в "
-            "ALLOWED_CHAT_IDS в .env.",
+            f"ℹ️ Новый chat_id группы: <code>{new_chat_id}</code>. "
+            "Замените старый id в ALLOWED_CHAT_IDS.",
         )
 
     dp = build_dispatcher(ctx, on_migrate)

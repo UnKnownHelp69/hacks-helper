@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from bot.db.database import Database
 from bot.db.migrations import LATEST_VERSION, get_version, migrate
 from bot.db.models import HACK_FINISHED, TASK_CLOSED, TASK_NOT_STARTED, TASK_SOURCE_BOT
+from bot.db.repositories import Storage
 from tests.conftest import ALLOWED_CHAT
 
 START = datetime(2026, 11, 5, 7, 0, tzinfo=UTC)
@@ -95,3 +96,26 @@ async def test_reopened_task_is_reactivated(storage):
     )
     assert again.id == task.id and again.active and again.closed_at is None
     assert again.seen_assigned  # never downgraded
+
+
+async def test_existing_v1_database_is_upgraded(tmp_path):
+    import aiosqlite
+
+    from bot.db.migrations import MIGRATIONS
+
+    path = tmp_path / "old.db"
+    async with aiosqlite.connect(path) as conn:
+        await conn.executescript(MIGRATIONS[0])
+        await conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+        await conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+        await conn.execute(
+            "INSERT INTO chats (chat_id, timezone) VALUES (?, ?)", (ALLOWED_CHAT, "Asia/Omsk")
+        )
+        await conn.commit()
+    db = Database(path)
+    await db.connect()
+    assert await get_version(db.conn) == LATEST_VERSION
+    storage_ = Storage(db, "Europe/Moscow")
+    assert await storage_.chats.get_timezone(ALLOWED_CHAT) == "Asia/Omsk"  # data kept
+    assert await storage_.popups.add(ALLOWED_CHAT, "x") > 0
+    await db.close()

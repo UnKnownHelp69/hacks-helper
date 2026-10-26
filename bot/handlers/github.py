@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from bot.context import AppContext, IssueQuery
 from bot.errors import UserError
 from bot.handlers.base import NO_PREVIEW, reply, usage
+from bot.respond import respond
 from bot.services.args import Token, parse_command, reply_target, resolve_user_token
 from bot.services.formatting import issue_link
 from bot.services.github import Issue, normalize_login
@@ -60,13 +61,11 @@ async def _render_issues_page(
         filters.append(f"исполнитель {escape(query.assignee_login)}")
     if query.label:
         filters.append(f"метка «{escape(query.label)}»")
-    header = (
-        f"📋 <b>{escape(hack.slug)}</b> · <code>{escape(repo)}</code> · открытых: {len(issues)}"
-    )
+    header = f"📋 <b>{escape(hack.slug)}</b> · {escape(repo)} · открытых: {len(issues)}"
     if filters:
         header += f" ({', '.join(filters)})"
     if not issues:
-        return header + "\nОткрытых issues нет", None
+        return header, None
 
     # GitHub login -> Telegram display (without pings)
     members = await ctx.storage.hackathons.members(hack.id)
@@ -109,7 +108,7 @@ async def cmd_issues(message: Message, ctx: AppContext, is_admin: bool) -> None:
         if token.text.lower().startswith("label:"):
             label = token.text[len("label:") :].strip() or None
             if label is None:
-                raise UserError('Укажите метку: label:bug или label:"in progress"')
+                raise UserError('Формат: label:bug или label:"in progress"')
         else:
             user_tokens.append(token)
     assignee_login = None
@@ -117,7 +116,7 @@ async def cmd_issues(message: Message, ctx: AppContext, is_admin: bool) -> None:
     if user_id is not None:
         assignee_login = await ctx.storage.github_links.get_login(user_id)
         if not assignee_login:
-            raise UserError("У этого человека не привязан GitHub-логин (/link_github)")
+            raise UserError("GitHub не привязан (/link_github)")
     query = IssueQuery(message.chat.id, hack.id, assignee_login, label)
     token = ctx.remember_issue_query(query)
     text, keyboard = await _render_issues_page(ctx, query, 0, token)
@@ -144,14 +143,12 @@ async def cb_issues_page(callback: CallbackQuery, ctx: AppContext) -> None:
 async def cmd_issue_new(message: Message, ctx: AppContext, is_admin: bool) -> None:
     cmd = parse_command(message)
     if len(cmd.tokens) < 2:
-        raise usage("/issue_new <хак> [@исполнитель] <название>\n<описание с новой строки>")
+        raise usage("/issue_new <хак> [@кто] <название>, описание со 2-й строки")
     assert message.from_user is not None
     caller = message.from_user.id
     hack = await ctx.hackathon(message.chat.id, cmd.tokens[0].text)
     if not is_admin and not await ctx.storage.hackathons.is_member(hack.id, caller):
-        raise UserError(
-            f"Создавать issues в {escape(hack.slug)} могут участники хакатона и администраторы бота"
-        )
+        raise UserError(f"Создавать issues в {escape(hack.slug)} могут только его участники")
     title_index = 1
     assignee_id = None
     second = cmd.tokens[1]
@@ -170,18 +167,18 @@ async def cmd_issue_new(message: Message, ctx: AppContext, is_admin: bool) -> No
     title, _, body = rest.partition("\n")
     title = title.strip()
     if not title:
-        raise UserError("Укажите название issue")
+        raise UserError("Нет названия")
     if len(title) > 256:
-        raise UserError("Название слишком длинное (максимум 256 символов)")
+        raise UserError("Название длиннее 256 символов")
     body = body.strip()
     footer = "_Создано через Telegram-бота команды_"
     body = f"{body}\n\n{footer}" if body else footer
     result = await ctx.tasks.create_issue(hack, title, body, assignee_id)
     issue = result.issue
-    lines = [f"✅ Создан {issue_link(issue.number, issue.title, issue.html_url)}"]
+    lines = [f"✅ {issue_link(issue.number, issue.title, issue.html_url)}"]
     if assignee_id is not None:
         name = await ctx.directory.plain(message.chat.id, assignee_id)
-        lines.append(f"Задача назначена: {name}")
+        lines[0] += f" → {name}"
     lines.extend(f"⚠️ {w}" for w in result.warnings)
     await reply(message, "\n".join(lines))
 
@@ -207,19 +204,19 @@ async def cmd_link_github(message: Message, ctx: AppContext, is_admin: bool) -> 
         )
         raw_login = cmd.tokens[1].text
     else:
-        raise usage("/link_github <логин>   🔒 /link_github @user <логин>")
+        raise usage("/link_github <логин>")
     if target != caller and not is_admin:
-        raise UserError("Привязать GitHub за другого человека может только администратор бота")
+        raise UserError("Привязать GitHub другому может только админ бота")
     login = normalize_login(raw_login)
     owner = await ctx.storage.github_links.get_user_by_login(login)
     if owner is not None and owner != target:
         name = await ctx.directory.plain(message.chat.id, owner)
-        raise UserError(f"GitHub-логин {escape(login)} уже привязан к {name}")
+        raise UserError(f"{escape(login)} уже привязан к {name}")
     if ctx.github.configured and not await ctx.github.user_exists(login):
-        raise UserError(f"Пользователь GitHub «{escape(login)}» не найден")
+        raise UserError(f"GitHub-пользователь {escape(login)} не найден")
     await ctx.storage.github_links.set_login(target, login)
     name = await ctx.directory.plain(message.chat.id, target)
-    await message.reply(f"✅ GitHub {escape(login)} привязан к {name}")
+    await respond(message, f"✅ {name} → GitHub {escape(login)}", ctx)
 
 
 @router.message(Command("unlink_github"))
@@ -239,9 +236,9 @@ async def cmd_unlink_github(message: Message, ctx: AppContext, is_admin: bool) -
     elif is_admin and (reply_user := reply_target(message)) is not None:
         target = reply_user.id
     if target != caller and not is_admin:
-        raise UserError("Отвязать GitHub другого человека может только администратор бота")
+        raise UserError("Отвязать GitHub другому может только админ бота")
     removed = await ctx.storage.github_links.remove(target)
     name = await ctx.directory.plain(message.chat.id, target)
-    await message.reply(
-        f"GitHub отвязан от {name}" if removed else f"У {name} GitHub не был привязан"
+    await respond(
+        message, f"✅ {name}: GitHub отвязан" if removed else f"{name}: GitHub не привязан", ctx
     )

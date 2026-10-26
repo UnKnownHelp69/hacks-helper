@@ -123,7 +123,7 @@ async def test_assign_without_login_warns_and_keeps_task(env):
     result = await env["tasks"].assign(env["hack"], BOB, 12)
     assert result.task is not None and not result.task.seen_assigned
     assert env["github"].added == []
-    assert "не привязан GitHub" in result.warnings[0]
+    assert "GitHub не привязан" in result.warnings[0]
 
 
 async def test_assign_validations(env):
@@ -133,7 +133,7 @@ async def test_assign_validations(env):
     with pytest.raises(UserError, match="уже закрыт"):
         await env["tasks"].assign(env["hack"], ALICE, 1)
     env["github"].put(2)
-    with pytest.raises(UserError, match="не участвует"):
+    with pytest.raises(UserError, match="участвует"):
         await env["tasks"].assign(env["hack"], 999999, 2)
 
 
@@ -200,7 +200,7 @@ async def test_notification_does_not_ping_unavailable_user(env):
     await env["storage"].availability.set_days(ALICE, {3: serialize_day(parse_day_value("нет"))})
     env["github"].put(5, assignees=["alice-gh"])
     lines = await env["tasks"].sync_hackathon(env["hack"], NOW)
-    assert "<code>alice_tg</code>" in lines[0] and "@alice_tg" not in lines[0]
+    assert "alice_tg" in lines[0] and "@alice_tg" not in lines[0]
 
 
 async def test_poll_skips_hackathons_of_foreign_chats(env, storage):
@@ -261,15 +261,15 @@ async def test_reminder_skips_left_member_and_defers_unavailable(env):
     await env["reminders"].send_due_reminders(NOW)
     text = bot.sent[-1][1]
     assert "@alice_tg" not in text and "@bob_tg" not in text
-    assert "<code>bob_tg</code> нет в группе" in text
-    assert "Напомню позже" in text
+    assert "bob_tg нет в группе" in text
+    assert "⏸ Позже: alice_tg" in text
     deferred = await storage.reminders.list_deferred()
     assert [(d.user_id, d.milestone) for d in deferred] == [(ALICE, MILESTONE_START)]
 
     await env["reminders"].process_deferred(NOW + timedelta(hours=1))  # 13:00, still not
     assert len(await storage.reminders.list_deferred()) == 1
     await env["reminders"].process_deferred(NOW + timedelta(hours=3, minutes=1))  # 15:01
-    assert "@alice_tg" in bot.sent[-1][1] and "отложенное" in bot.sent[-1][1]
+    assert "@alice_tg" in bot.sent[-1][1] and "до начала" in bot.sent[-1][1]
     assert await storage.reminders.list_deferred() == []
 
 
@@ -303,7 +303,7 @@ async def test_archive_after_end(env):
     assert hack.status == HACK_FINISHED
     assert await storage.tasks.active_for_hackathon(hack.id) == []
     assert await storage.tasks.closed_counts(hack.id) == (1, {ALICE: 1})
-    assert "завершён и перенесён в архив" in env["bot"].sent[-1][1]
+    assert "завершён, закрыто issues: 1" in env["bot"].sent[-1][1]
     assert await storage.hackathons.members(hack.id) == [ALICE, BOB]
     # not archived twice
     assert await env["archive"].archive_due(env["hack"].end_at + timedelta(hours=1)) == []
