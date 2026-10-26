@@ -1,0 +1,8 @@
+# Runtime dependencies (pinned)
+aiogram==3.31.0
+aiosqlite==0.22.1
+APScheduler==3.11.3
+httpx==0.28.1
+python-dotenv==1.2.4
+# IANA time zone database for zoneinfo (required on Windows, harmless elsewhere)
+tzdata==2026.5
