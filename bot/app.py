@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.types import (
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
@@ -100,6 +102,22 @@ async def apply_known_migrations(settings: Settings, storage: Storage) -> None:
             )
 
 
+async def wait_for_telegram(bot: Bot) -> None:
+    """Retry getMe until Telegram is reachable (e.g. the PC booted before the network)."""
+    delay = 5
+    while True:
+        try:
+            await bot.get_me()
+            return
+        except TelegramUnauthorizedError:
+            log.error("Telegram rejected BOT_TOKEN: check the token in .env")
+            raise
+        except Exception as exc:
+            log.warning("Telegram is unreachable (%s), retrying in %d s", exc, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 120)
+
+
 async def check_bot_rights(bot: Bot, settings: Settings) -> None:
     me = await bot.get_me()
     log.info(
@@ -152,14 +170,21 @@ async def run(settings: Settings) -> None:
 
     db = Database(settings.database_path)
     await db.connect()
-    storage = Storage(db, settings.default_timezone)
-    await apply_known_migrations(settings, storage)
+    try:
+        await _run_bot(settings, Storage(db, settings.default_timezone))
+    finally:
+        # Always close the DB: aiosqlite's worker thread would otherwise keep the process alive.
+        await db.close()
+        log.info("Bot stopped")
 
+
+async def _run_bot(settings: Settings, storage: Storage) -> None:
+    await apply_known_migrations(settings, storage)
     bot = Bot(
         settings.bot_token,
         default=DefaultBotProperties(
             parse_mode=ParseMode.HTML,
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            link_preview=LinkPreviewOptions(is_disabled=True),
         ),
     )
     ctx = build_context(settings, bot, storage)
@@ -183,10 +208,10 @@ async def run(settings: Settings) -> None:
         )
 
     dp = build_dispatcher(ctx, on_migrate)
-
     scheduler = create_scheduler(settings, ctx.archive, ctx.reminders, ctx.tasks)
 
     try:
+        await wait_for_telegram(bot)
         try:
             await bot.set_my_commands(group_bot_commands(), scope=BotCommandScopeAllGroupChats())
             await bot.set_my_commands(
@@ -207,5 +232,3 @@ async def run(settings: Settings) -> None:
             scheduler.shutdown(wait=False)
         await ctx.github.close()
         await bot.session.close()
-        await db.close()
-        log.info("Bot stopped")
