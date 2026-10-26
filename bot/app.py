@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -51,8 +52,10 @@ EXTRA_RIGHTS = (
 )
 
 
-def build_context(settings: Settings, bot: Bot, storage: Storage) -> AppContext:
-    github = GitHubClient(settings.github_token)
+def build_context(
+    settings: Settings, bot: Bot, storage: Storage, github: GitHubClient | None = None
+) -> AppContext:
+    github = github or GitHubClient(settings.github_token)
     directory = UserDirectory(bot, storage.users, settings.user_cache_ttl_seconds)
     pinger = Pinger(directory, storage.availability)
     messenger = Messenger(bot)
@@ -70,6 +73,17 @@ def build_context(settings: Settings, bot: Bot, storage: Storage) -> AppContext:
         reminders=reminders,
         archive=archive,
     )
+
+
+def build_dispatcher(
+    ctx: AppContext, on_migrate: Callable[[int, int], Awaitable[None]] | None = None
+) -> Dispatcher:
+    """Dispatcher with security first, then the user registry, then the handlers."""
+    dp = Dispatcher(ctx=ctx)
+    dp.update.outer_middleware(SecurityMiddleware(ctx.settings, on_migrate))
+    dp.update.outer_middleware(UserRegistryMiddleware(ctx.directory))
+    dp.include_router(build_router())
+    return dp
 
 
 async def apply_known_migrations(settings: Settings, storage: Storage) -> None:
@@ -168,10 +182,7 @@ async def run(settings: Settings) -> None:
             "ALLOWED_CHAT_IDS в .env.",
         )
 
-    dp = Dispatcher(ctx=ctx)
-    dp.update.outer_middleware(SecurityMiddleware(settings, on_migrate))
-    dp.update.outer_middleware(UserRegistryMiddleware(ctx.directory))
-    dp.include_router(build_router())
+    dp = build_dispatcher(ctx, on_migrate)
 
     scheduler = create_scheduler(settings, ctx.archive, ctx.reminders, ctx.tasks)
 

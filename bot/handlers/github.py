@@ -82,7 +82,7 @@ async def _render_issues_page(
                 assignees.append(await ctx.directory.plain(hack.chat_id, uid))
             else:
                 assignees.append(escape(login))
-        who = ", ".join(assignees) if assignees else "—"
+        who = ", ".join(assignees) if assignees else "не назначен"
         labels = f" [{escape(', '.join(issue.labels))}]" if issue.labels else ""
         lines.append(f"• {issue_link(issue.number, issue.title, issue.html_url)}{labels} — {who}")
     if pages > 1:

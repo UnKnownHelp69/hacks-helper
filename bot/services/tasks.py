@@ -257,7 +257,7 @@ class TaskService:
             if status != task.status:
                 await self.storage.tasks.update_status(task.id, status, title=issue.title)
                 if status == TASK_CLOSED:
-                    lines.append(f"✅ {link} закрыт ({await who(task.user_id)})")
+                    lines.append(f"{link} закрыт ✅ ({await who(task.user_id)})")
                 else:
                     lines.append(f"🔄 {link}: {await who(task.user_id)} → {STATUS_TITLES[status]}")
             elif issue.title != task.issue_title:
