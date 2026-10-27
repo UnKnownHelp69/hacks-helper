@@ -93,6 +93,10 @@ class UserDirectory:
             del self._cache[key]
 
     async def lookup(self, chat_id: int, user_id: int, *, force: bool = False) -> MemberInfo:
+        if chat_id > 0:
+            # A private chat contains only its owner; getChatMember is for groups.
+            status = "member" if user_id == chat_id else STATUS_NOT_FOUND
+            return await self._from_registry(user_id, status)
         key = (chat_id, user_id)
         cached = self._cache.get(key)
         if cached and not force and cached[0] > time.monotonic():

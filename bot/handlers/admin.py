@@ -8,7 +8,6 @@ import re
 from html import escape
 
 from aiogram import F, Router
-from aiogram.enums import ChatType
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -32,7 +31,6 @@ from bot.services.timeutil import format_dt, get_zone, parse_datetime, utc_offse
 log = logging.getLogger(__name__)
 
 router = Router(name="admin")
-router.message.filter(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 router.message.middleware(AdminOnlyMiddleware())
 router.callback_query.middleware(AdminOnlyMiddleware())
 

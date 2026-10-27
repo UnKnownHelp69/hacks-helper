@@ -2,8 +2,8 @@
 
 * Updates from chats that are not in ALLOWED_CHAT_IDS are dropped; if the bot
   finds itself in such a chat it leaves it without writing anything.
-* In private chats only /whoami is processed.
-* Setup mode (ALLOWED_CHAT_IDS empty): only /chatid in groups and /whoami in
+* In private chats only /me is processed unless the chat is explicitly allowed.
+* Setup mode (ALLOWED_CHAT_IDS empty): only /help in groups and /me in
   private chats are processed, and the bot leaves no chats.
 * Bot admin status is computed here, centrally, from the user_id only.
 """
@@ -138,7 +138,7 @@ class SecurityMiddleware(BaseMiddleware):
                 if added:
                     log.warning(
                         "Setup mode: bot added to chat %s ('%s') by user %s. "
-                        "Send /chatid there to get its id for ALLOWED_CHAT_IDS.",
+                        "Send /help there to get its id for ALLOWED_CHAT_IDS.",
                         chat.id,
                         chat.title,
                         event.from_user.id if event.from_user else None,
@@ -157,7 +157,9 @@ class SecurityMiddleware(BaseMiddleware):
         message = update.message
 
         if chat.type == ChatType.PRIVATE:
-            return message is not None and command_name(message) == "whoami"
+            return settings.is_chat_allowed(chat.id) or (
+                message is not None and command_name(message) == "me"
+            )
 
         # Group -> supergroup migration of an allowed chat.
         if message is not None and not settings.setup_mode:
@@ -171,7 +173,7 @@ class SecurityMiddleware(BaseMiddleware):
                 return False
 
         if settings.setup_mode:
-            return message is not None and command_name(message) == "chatid"
+            return message is not None and command_name(message) == "help"
 
         if not settings.is_chat_allowed(chat.id):
             if chat.id not in self._left_chats and chat.type != ChatType.PRIVATE:

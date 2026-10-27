@@ -1,9 +1,13 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.methods import GetMe
 
 from bot import app as app_module
 from bot.config import ConfigError, load_settings
+from tests.conftest import ADMIN_ID, make_settings
 
 
 class FlakyBot:
@@ -35,6 +39,41 @@ async def test_wait_for_telegram_stops_on_bad_token():
     bot = FlakyBot([TelegramUnauthorizedError(method=GetMe(), message="Unauthorized")])
     with pytest.raises(TelegramUnauthorizedError):
         await app_module.wait_for_telegram(bot)  # type: ignore[arg-type]
+
+
+async def test_private_chat_needs_no_group_admin_rights():
+    bot = SimpleNamespace(
+        get_me=AsyncMock(
+            return_value=SimpleNamespace(
+                username="hacks_bot", id=4242, can_read_all_group_messages=False
+            )
+        ),
+        get_chat_member=AsyncMock(),
+        send_message=AsyncMock(),
+    )
+    await app_module.check_bot_rights(  # type: ignore[arg-type]
+        bot, make_settings(allowed_chat_ids={ADMIN_ID})
+    )
+    bot.get_chat_member.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
+
+
+async def test_four_commands_replace_every_menu_scope():
+    bot = SimpleNamespace(set_my_commands=AsyncMock())
+    await app_module.register_commands(  # type: ignore[arg-type]
+        bot, make_settings(allowed_chat_ids={ADMIN_ID, -1001})
+    )
+    calls = bot.set_my_commands.await_args_list
+    assert [call.kwargs["scope"].type for call in calls] == [
+        "default",
+        "all_group_chats",
+        "all_private_chats",
+        "chat",
+        "chat",
+    ]
+    assert [call.kwargs["scope"].chat_id for call in calls[3:]] == [-1001, ADMIN_ID]
+    for call in calls:
+        assert [command.command for command in call.args[0]] == ["help", "hack", "me", "github"]
 
 
 def test_settings_parsing(monkeypatch, tmp_path):

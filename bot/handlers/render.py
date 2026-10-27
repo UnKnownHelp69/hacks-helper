@@ -88,7 +88,7 @@ def materials_lines(hack: Hackathon) -> list[str]:
         lines.append(f"📄 ТЗ: {link(hack.spec_url, hack.spec_url)}")
     elif hack.spec_file_id:
         name = hack.spec_file_name or "файл"
-        lines.append(f"📄 ТЗ: файл «{escape(name)}» (/links {escape(hack.slug)})")
+        lines.append(f"📄 ТЗ: файл «{escape(name)}»")
     return lines
 
 

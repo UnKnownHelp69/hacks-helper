@@ -49,10 +49,8 @@ class ArchiveService:
             if not allowed:
                 continue
             total, _ = await self.storage.tasks.closed_counts(hack.id)
-            slug = escape(hack.slug)
             text = [
                 f"🏁 <b>{escape(hack.display_name)}</b> завершён, закрыто issues: {total}",
-                f"Место: /place {slug} &lt;место|нет&gt;",
             ]
             if sync_lines:
                 text = [*sync_lines, "", *text]

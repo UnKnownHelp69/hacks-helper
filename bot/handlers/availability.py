@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from aiogram import F, Router
-from aiogram.enums import ChatType
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -21,7 +20,6 @@ from bot.services.availability import (
 )
 
 router = Router(name="availability")
-router.message.filter(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 
 OTHERS_ADMIN_ONLY = "Чужое расписание меняет только админ бота"
 

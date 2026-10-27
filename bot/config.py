@@ -77,7 +77,7 @@ class Settings:
 
     @property
     def setup_mode(self) -> bool:
-        """True when ALLOWED_CHAT_IDS is empty: the bot only answers /chatid and /whoami."""
+        """True when ALLOWED_CHAT_IDS is empty: /help in groups and /me in private chats."""
         return not self.allowed_chat_ids
 
     def is_chat_allowed(self, chat_id: int) -> bool:

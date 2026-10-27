@@ -103,12 +103,33 @@ async def test_bot_added_to_allowed_chat_is_processed(fake_bot):
     assert fake_bot.left == []
 
 
-async def test_private_chat_only_whoami(fake_bot):
+async def test_unallowed_private_chat_only_me(fake_bot):
     mw = SecurityMiddleware(make_settings())
     private = Chat(id=USER_ID, type="private")
-    assert await mw.check(update_with(message("/whoami", chat=private)), fake_bot)
-    for text in ("/help", "/me", "/hacks", "/start", "hello", "/chatid"):
+    assert await mw.check(update_with(message("/me", chat=private)), fake_bot)
+    for text in ("/help", "/github", "/hack", "/start", "hello", "/whoami"):
         assert not await mw.check(update_with(message(text, chat=private)), fake_bot), text
+    assert fake_bot.left == []
+
+
+async def test_allowed_private_chat_accepts_commands_and_callbacks(fake_bot):
+    settings = make_settings(allowed_chat_ids={ADMIN_ID})
+    mw = SecurityMiddleware(settings)
+    private = Chat(id=ADMIN_ID, type="private")
+    msg = message("/hack demo", chat=private, from_user=user(ADMIN_ID))
+    assert await mw.check(update_with(msg), fake_bot)
+    assert is_bot_admin(settings, msg)
+    callback = CallbackQuery(
+        id="private", from_user=user(ADMIN_ID), chat_instance="x", data="my:me", message=msg
+    )
+    assert await mw.check(Update(update_id=1, callback_query=callback), fake_bot)
+    assert is_bot_admin(settings, callback)
+    foreign = message("/hacks", chat=Chat(id=USER_ID, type="private"))
+    assert not await mw.check(update_with(foreign), fake_bot)
+    assert not await mw.check(
+        Update(update_id=2, callback_query=callback.model_copy(update={"message": foreign})),
+        fake_bot,
+    )
     assert fake_bot.left == []
 
 
@@ -127,23 +148,23 @@ async def test_callback_from_foreign_chat_is_dropped(fake_bot):
 # --- setup mode (ALLOWED_CHAT_IDS empty) ---
 
 
-async def test_setup_mode_only_chatid_and_whoami_and_never_leaves(fake_bot):
+async def test_setup_mode_only_help_and_me_and_never_leaves(fake_bot):
     mw = SecurityMiddleware(make_settings(allowed_chat_ids=set()))
     chat = group(FOREIGN_CHAT)
-    assert await mw.check(update_with(message("/chatid", chat=chat)), fake_bot)
-    assert await mw.check(update_with(message("/chatid@hacks_bot", chat=chat)), fake_bot)
-    for text in ("/help", "/hack_new x", "/me", "hello"):
+    assert await mw.check(update_with(message("/help", chat=chat)), fake_bot)
+    assert await mw.check(update_with(message("/help@hacks_bot", chat=chat)), fake_bot)
+    for text in ("/hack", "/github", "/me", "/chatid", "hello"):
         assert not await mw.check(update_with(message(text, chat=chat)), fake_bot), text
     private = Chat(id=USER_ID, type="private")
-    assert await mw.check(update_with(message("/whoami", chat=private)), fake_bot)
+    assert await mw.check(update_with(message("/me", chat=private)), fake_bot)
     assert not await mw.check(bot_added(FOREIGN_CHAT), fake_bot)
     assert fake_bot.left == []
 
 
-async def test_after_setup_chatid_works_only_in_allowed_chats(fake_bot):
+async def test_after_setup_help_works_only_in_allowed_chats(fake_bot):
     mw = SecurityMiddleware(make_settings())
-    assert await mw.check(update_with(message("/chatid")), fake_bot)
-    assert not await mw.check(update_with(message("/chatid", chat=group(FOREIGN_CHAT))), fake_bot)
+    assert await mw.check(update_with(message("/help")), fake_bot)
+    assert not await mw.check(update_with(message("/help", chat=group(FOREIGN_CHAT))), fake_bot)
     assert fake_bot.left == [FOREIGN_CHAT]
 
 

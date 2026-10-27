@@ -13,6 +13,8 @@ from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.types import (
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
     LinkPreviewOptions,
 )
 
@@ -30,7 +32,7 @@ from bot.services.reminders import ReminderService
 from bot.services.scheduler import create_scheduler
 from bot.services.tasks import TaskService
 from bot.services.users import UserDirectory
-from bot.texts import group_bot_commands, private_bot_commands
+from bot.texts import bot_commands
 
 log = logging.getLogger(__name__)
 
@@ -124,9 +126,12 @@ async def check_bot_rights(bot: Bot, settings: Settings) -> None:
         "Running as @%s (id %s); privacy mode %s",
         me.username,
         me.id,
-        "off" if me.can_read_all_group_messages else "on (fine: the bot is a group admin)",
+        "off" if me.can_read_all_group_messages else "on",
     )
     for chat_id in sorted(settings.allowed_chat_ids):
+        if chat_id > 0:
+            log.info("Private chat %s enabled", chat_id)
+            continue
         try:
             member = await bot.get_chat_member(chat_id, me.id)
         except Exception as exc:
@@ -153,16 +158,29 @@ async def check_bot_rights(bot: Bot, settings: Settings) -> None:
             log.info("Bot is an administrator in chat %s with minimal rights", chat_id)
 
 
+async def register_commands(bot: Bot, settings: Settings) -> None:
+    """Replace global and chat-specific menus, including earlier command overrides."""
+    commands = bot_commands()
+    scopes = [
+        BotCommandScopeDefault(),
+        BotCommandScopeAllGroupChats(),
+        BotCommandScopeAllPrivateChats(),
+        *(BotCommandScopeChat(chat_id=chat_id) for chat_id in sorted(settings.allowed_chat_ids)),
+    ]
+    for scope in scopes:
+        await bot.set_my_commands(commands, scope=scope)
+
+
 async def run(settings: Settings) -> None:
     if settings.setup_mode:
         log.warning(
             "ALLOWED_CHAT_IDS is empty: SETUP MODE. The bot leaves no chats and only answers "
-            "/chatid in groups and /whoami in private chats. Add the bot to your group, send "
-            "/chatid there, put the id into ALLOWED_CHAT_IDS and restart the bot."
+            "/help in groups and /me in private chats. Put your chat id into "
+            "ALLOWED_CHAT_IDS and restart the bot."
         )
     if not settings.bot_admin_ids:
         log.warning(
-            "BOT_ADMIN_IDS is empty: nobody can run admin commands. Send /whoami to the bot "
+            "BOT_ADMIN_IDS is empty: nobody can run admin actions. Send /me to the bot "
             "in a private chat to learn your user_id."
         )
     if not settings.github_token:
@@ -214,10 +232,7 @@ async def _run_bot(settings: Settings, storage: Storage) -> None:
     try:
         await wait_for_telegram(bot)
         try:
-            await bot.set_my_commands(group_bot_commands(), scope=BotCommandScopeAllGroupChats())
-            await bot.set_my_commands(
-                private_bot_commands(), scope=BotCommandScopeAllPrivateChats()
-            )
+            await register_commands(bot, settings)
         except Exception as exc:
             log.warning("set_my_commands failed: %s", exc)
         if not settings.setup_mode:

@@ -201,6 +201,21 @@ async def test_display_falls_back_to_registry(directory, storage, fake_bot):
 # --- pings: membership and availability ---
 
 
+async def test_private_chat_pings_only_its_owner(directory, storage, fake_bot):
+    await directory.remember(user(USER_ID, "owner"))
+    await directory.remember(user(OTHER_ID, "other"))
+    now = datetime(2026, 10, 26, 0, 0, tzinfo=UTC)
+    pinger = Pinger(directory, storage.availability)
+    plan = await pinger.plan(USER_ID, [USER_ID, OTHER_ID], tz=MSK, now=now)
+    assert plan.mentions == ["@owner"]
+    assert plan.not_in_group == ["other"]
+    assert fake_bot.get_member_calls == 0
+
+    await storage.availability.set_days(USER_ID, {0: serialize_day(parse_day_value("нет"))})
+    plan = await pinger.plan(USER_ID, [USER_ID], tz=MSK, now=now)
+    assert plan.mentions == [] and plan.skipped_names == ["owner"]
+
+
 async def test_ping_plan_skips_left_and_defers_unavailable(directory, storage, fake_bot):
     fake_bot.set_member(ALLOWED_CHAT, user(1, "here"))
     fake_bot.set_member(ALLOWED_CHAT, user(2, "gone"), "left")

@@ -1,31 +1,27 @@
-"""Router assembly. The admin router goes first so admin commands are matched there."""
+"""Router assembly for the four public commands and answer buttons."""
 
 from __future__ import annotations
 
-from aiogram import Router
+from aiogram import F, Router
+from aiogram.enums import ChatType
 
 from bot.handlers import (
-    admin,
-    availability,
     common,
     events,
     github,
     hackathons,
     popups,
-    tasks,
 )
 
 
 def build_router() -> Router:
     root = Router(name="root")
+    root.message.filter(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP, ChatType.PRIVATE}))
     root.include_routers(
         events.router,
         popups.router,
-        admin.router,
         common.router,
         hackathons.router,
         github.router,
-        tasks.router,
-        availability.router,
     )
     return root

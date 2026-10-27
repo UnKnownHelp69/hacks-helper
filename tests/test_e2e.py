@@ -6,6 +6,7 @@ import importlib
 import itertools
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
+from html import unescape
 from typing import Any
 
 import httpx
@@ -64,7 +65,9 @@ class MockSession(BaseSession):
             return Message(
                 message_id=next(_ids),
                 date=now,
-                chat=Chat(id=method.chat_id, type="supergroup"),
+                chat=Chat(
+                    id=method.chat_id, type="private" if method.chat_id > 0 else "supergroup"
+                ),
                 text=getattr(method, "text", None),
             )
         if isinstance(method, GetChatMember):
@@ -170,7 +173,7 @@ async def shown(app, presser: User) -> str:
     message = Message(
         message_id=next(_ids),
         date=datetime(2026, 10, 26, tzinfo=UTC),
-        chat=Chat(id=last.chat_id, type="supergroup"),
+        chat=Chat(id=last.chat_id, type="private" if last.chat_id > 0 else "supergroup"),
         text=last.text,
     )
     callback = CallbackQuery(
@@ -186,127 +189,22 @@ async def shown(app, presser: User) -> str:
     return "\n".join(m.text for m in new if isinstance(m, SendMessage))
 
 
-async def test_full_flow(app):
-    session = app["session"]
-
-    # Alice introduces herself so the bot learns her user_id
-    await send(app, "/me", ALICE)
-    assert session.last_text() == "👀 /me"  # the answer itself is hidden behind a button
-    assert f"id: {USER_ID}" in await shown(app, ALICE)
-
-    # non-admin cannot create hackathons
-    await send(app, "/hack_new h2026 01.12.2026 23:59 05.12.2026 10:00 07.12.2026 18:00", ALICE)
-    assert await shown(app, ALICE) == "Эта команда доступна только администраторам бота"
-
-    await send(app, "/hack_new h2026 01.12.2026 23:59 05.12.2026 10:00 07.12.2026 18:00 Хакатон")
-    assert "✅ Создан" in await shown(app, ADMIN)
-    hack = await app["storage"].hackathons.get(ALLOWED_CHAT, "h2026")
-    assert hack is not None and hack.start_at == datetime(2026, 12, 5, 7, 0, tzinfo=UTC)
-
-    await send(app, "/hack_new bad 05.12.2026 10:00 01.12.2026 23:59 07.12.2026 18:00")
-    assert "не позже начала" in await shown(app, ADMIN)
-
-    await send(app, "/add h2026 @alice_tg @ghost_user")
-    text = await shown(app, ADMIN)
-    assert "+alice_tg" in text and "Я ещё не знаю @ghost_user" in text
-    assert await app["storage"].hackathons.members(hack.id) == [USER_ID]
-
-    await send(app, "/repo h2026 https://github.com/team/project")
-    assert "team/project" in await shown(app, ADMIN)
-
-    await send(app, "/link_github alice-gh", ALICE)
-    assert "GitHub alice-gh" in await shown(app, ALICE)
-
-    await send(app, "/task h2026 12", ALICE)  # self-assignment
-    assert "#12 Авторизация" in await shown(app, ALICE)
-    tasks = await app["storage"].tasks.active_for_hackathon(hack.id)
-    assert [(t.user_id, t.issue_number) for t in tasks] == [(USER_ID, 12)]
-
-    await send(app, "/task h2026 @admin_user 12", ALICE)  # assigning others: admin only
-    assert "только админ" in await shown(app, ALICE)
-
-    await send(app, "/tasks h2026", ALICE)
-    text = await shown(app, ALICE)
-    assert "alice_tg" in text and "@alice_tg" not in text
-
-    # "/tasks" alone gives a "my tasks" button computed for whoever presses it
-    await send(app, "/tasks", ALICE)
-    assert "#12 Авторизация" in await shown(app, ALICE)
-    assert "admin_user: задач нет" in await shown(app, ADMIN)
-
-    await send(app, "/issues h2026", ALICE)  # links + paging: always a chat message
-    assert "#12 Авторизация" in session.last_text()
-
-    await send(app, "/issue_new h2026 me Новая\nОписание", ALICE)
-    assert "Новая" in await shown(app, ALICE)
-
-    await send(app, "/avail_set ср 09:00-21:00", ALICE)
-    assert "Ср: 09:00–21:00" in await shown(app, ALICE)
-
-    await send(app, "/avail_set ср нет @admin_user", ALICE)
-    assert "только админ" in await shown(app, ALICE)
-
-    await send(app, "/set_tz Asia/Yekaterinburg", ALICE)
-    assert await shown(app, ALICE) == "Эта команда доступна только администраторам бота"
-    await send(app, "/set_tz Asia/Yekaterinburg")
-    await send(app, "/tz", ALICE)
-    text = await shown(app, ALICE)
-    assert "Asia/Yekaterinburg" in text and "UTC+05:00" in text
-
-    await send(app, "/left h2026", ALICE)
-    assert "до окончания регистрации" in await shown(app, ALICE)
-
-    await send(app, "/hacks", ALICE)
-    assert "Хакатон (h2026)" in await shown(app, ALICE)
-
-    await send(app, "/hack h2026", ALICE)
-    assert "05.12.2026 12:00" in await shown(app, ALICE)  # shown in the new time zone
-
-    await send(app, "/help@hacks_bot", ALICE)
-    assert "🔒" in session.last_text()
-
-    await send(app, "/place h2026 2")
-    assert "после завершения" in await shown(app, ADMIN)
-
-    await send(app, "/hack nope", ALICE)
-    assert "не найден" in await shown(app, ALICE)
-
-    # names are plain text: <code> renders as empty boxes in some Linux clients
-    assert not any("<code>alice_tg" in t for t in session.texts())
+async def create_hack(app, chat_id=ALLOWED_CHAT, slug="h2026", title="Хакатон"):
+    return await app["storage"].hackathons.create(
+        chat_id,
+        slug,
+        title,
+        datetime(2026, 12, 1, 20, 59, tzinfo=UTC),
+        datetime(2026, 12, 5, 7, 0, tzinfo=UTC),
+        datetime(2026, 12, 7, 15, 0, tzinfo=UTC),
+    )
 
 
-async def test_long_answers_go_to_chat(app):
-    session = app["session"]
-    storage = app["storage"]
-    await send(app, "/me", ALICE)
-    await send(app, "/hack_new h1 01.12.2026 23:59 05.12.2026 10:00 07.12.2026 18:00")
-    hack = await storage.hackathons.get(ALLOWED_CHAT, "h1")
-    await storage.hackathons.add_member(hack.id, USER_ID)
-    for number in range(1, 8):
-        await storage.tasks.upsert_active(
-            hack.id,
-            USER_ID,
-            number,
-            f"Длинное название задачи {number}",
-            "",
-            "not_started",
-            "bot",
-            False,
-        )
-    await send(app, "/tasks", ALICE)
-    last = [m for m in session.requests if isinstance(m, SendMessage)][-1]
-    assert last.reply_markup is None and "Длинное название задачи 7" in last.text
-
-    # an old "my tasks" button whose answer has grown too long posts it to the chat
-    popup_owner = await shown_after_button(app, "my:tasks", ALICE)
-    assert "Длинное название задачи 1" in popup_owner
-
-
-async def shown_after_button(app, data: str, presser: User) -> str:
+async def press(app, data, presser=ADMIN, chat_id=ALLOWED_CHAT):
     message = Message(
         message_id=next(_ids),
         date=datetime(2026, 10, 26, tzinfo=UTC),
-        chat=Chat(id=ALLOWED_CHAT, type="supergroup"),
+        chat=Chat(id=chat_id, type="private" if chat_id > 0 else "supergroup"),
         text="👀",
     )
     callback = CallbackQuery(
@@ -314,112 +212,189 @@ async def shown_after_button(app, data: str, presser: User) -> str:
     )
     before = len(app["session"].requests)
     await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), callback_query=callback))
-    new = app["session"].requests[before:]
-    assert any(isinstance(m, AnswerCallbackQuery) and not m.show_alert for m in new)
-    return "\n".join(m.text for m in new if isinstance(m, SendMessage))
+    return app["session"].requests[before:]
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, ADMIN_ID])
+async def test_four_public_commands(app, chat_id):
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    await send(app, "/help@hacks_bot", chat_id=chat_id)
+    help_text = app["session"].last_text()
+    for name in ("help", "hack", "me", "github"):
+        assert f"/{name}" in help_text
+    assert "/hack_new" not in help_text and "/link_github" not in help_text
+    await send(app, "/me", chat_id=chat_id)
+    assert f"id: {ADMIN_ID}" in await shown(app, ADMIN)
+    await send(app, "/hack", chat_id=chat_id)
+    assert await shown(app, ADMIN) == "Активных хакатонов нет"
+    await send(app, "/github", chat_id=chat_id)
+    assert "Аккаунт: не привязан" in app["session"].last_text()
+    assert "Интеграция: настроена" in app["session"].last_text()
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, ADMIN_ID])
+async def test_hack_list_and_card_are_chat_scoped(app, chat_id):
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    hack = await create_hack(app, chat_id, title="Хакатон <команды>")
+    await create_hack(app, FOREIGN_CHAT, slug="foreign", title="Чужой хакатон")
+    finished = await create_hack(app, chat_id, slug="finished", title="Завершённый хакатон")
+    await app["storage"].hackathons.archive(finished.id, finished.end_at)
+    await app["storage"].hackathons.add_member(hack.id, ADMIN_ID)
+    await send(app, "/hack", chat_id=chat_id)
+    text = await shown(app, ADMIN)
+    assert "Хакатон <команды>" in unescape(text) and "admin_user" in text
+    assert "Чужой хакатон" not in text and "Завершённый хакатон" not in text
+    await send(app, "/hack h2026", chat_id=chat_id)
+    text = await shown(app, ADMIN)
+    assert "05.12.2026 10:00" in text and "Участники (1)" in text
+    await send(app, "/hack nope", chat_id=chat_id)
+    assert "не найден, список: /hack" in await shown(app, ADMIN)
+    await send(app, "/hack h2026 extra", chat_id=chat_id)
+    assert "Формат: /hack" in await shown(app, ADMIN)
+
+
+async def test_github_shows_only_callers_account_without_token(app):
+    app["ctx"].github.token = None
+    await app["storage"].github_links.set_login(USER_ID, "alice-gh")
+    await app["storage"].github_links.set_login(ADMIN_ID, "admin-gh")
+    await send(app, "/github", ALICE)
+    text = app["session"].last_text()
+    assert 'href="https://github.com/alice-gh"' in text
+    assert "admin-gh" not in text and "Интеграция: не настроена" in text
+
+
+async def test_personal_profile_button_uses_presser(app):
+    await send(app, "/me", ALICE)
+    assert app["session"].last_text() == "👀 /me"
+    assert f"id: {USER_ID}" in await shown(app, ALICE)
+    assert f"id: {ADMIN_ID}" in await shown(app, ADMIN)
+
+
+async def test_long_hack_list_goes_to_chat(app):
+    for index in range(3):
+        await create_hack(app, slug=f"hack{index}")
+    await send(app, "/hack", ALICE)
+    last = [m for m in app["session"].requests if isinstance(m, SendMessage)][-1]
+    assert last.reply_markup is None
+    assert all(f"hack{index}" in last.text for index in range(3))
 
 
 async def test_expired_popup(app):
-    text = await shown_after_button_alert(app, "pop:999999")
-    assert text == "Ответ устарел, повторите команду"
+    requests = await press(app, "pop:999999")
+    answers = [m for m in requests if isinstance(m, AnswerCallbackQuery)]
+    assert answers[-1].text == "Ответ устарел, повторите команду"
 
 
-async def shown_after_button_alert(app, data: str) -> str:
-    message = Message(
-        message_id=next(_ids),
-        date=datetime(2026, 10, 26, tzinfo=UTC),
-        chat=Chat(id=ALLOWED_CHAT, type="supergroup"),
-        text="👀",
-    )
-    callback = CallbackQuery(
-        id=str(next(_ids)), from_user=ALICE, chat_instance="x", data=data, message=message
-    )
-    await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), callback_query=callback))
-    answers = [m for m in app["session"].requests if isinstance(m, AnswerCallbackQuery)]
-    return answers[-1].text
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, ADMIN_ID])
+async def test_removed_commands_are_not_handled(app, chat_id):
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    hack = await create_hack(app, chat_id)
+    removed = [
+        "start",
+        "whoami",
+        "chatid",
+        "tz",
+        "hacks",
+        "left",
+        "links",
+        "history",
+        "stats",
+        "tasks",
+        "task",
+        "untask",
+        "issues",
+        "issue_new",
+        "link_github",
+        "unlink_github",
+        "avail",
+        "avail_set",
+        "avail_reset",
+        "hack_new",
+        "hack_date",
+        "hack_title",
+        "hack_del",
+        "repo",
+        "add",
+        "remove",
+        "place",
+        "site",
+        "orgchat",
+        "spec",
+        "set_tz",
+    ]
+    for command in removed:
+        before = len(app["session"].requests)
+        await send(app, f"/{command} h2026", chat_id=chat_id)
+        assert app["session"].requests[before:] == [], command
+    assert await app["storage"].hackathons.get_by_id(hack.id) == hack
+    assert await app["storage"].hackathons.members(hack.id) == []
+    assert await app["storage"].tasks.active_for_hackathon(hack.id) == []
 
 
-async def test_reply_and_spec_file(app):
-    session = app["session"]
-    await send(app, "/hack_new h1 01.12.2026 23:59 05.12.2026 10:00 07.12.2026 18:00")
-    alice_msg = Message(
-        message_id=500,
-        date=datetime(2026, 10, 26, tzinfo=UTC),
-        chat=Chat(id=ALLOWED_CHAT, type="supergroup"),
-        from_user=ALICE,
-        text="привет",
-    )
-    await send(app, "/add h1", reply_to_message=alice_msg)
-    hack = await app["storage"].hackathons.get(ALLOWED_CHAT, "h1")
-    assert await app["storage"].hackathons.members(hack.id) == [USER_ID]
-
-    doc = Document(file_id="FILE_ID", file_unique_id="u", file_name="tz.pdf")
-    # a document with the command in its caption
+async def test_old_delete_button_and_spec_caption_do_not_mutate_data(app):
+    hack = await create_hack(app)
+    for actor in (ALICE, ADMIN):
+        assert await press(app, f"hdel:{hack.id}:y", actor) == []
+    document = Document(file_id="FILE_ID", file_unique_id="u", file_name="tz.pdf")
     message = Message(
         message_id=next(_ids),
         date=datetime(2026, 10, 26, tzinfo=UTC),
         chat=Chat(id=ALLOWED_CHAT, type="supergroup"),
         from_user=ADMIN,
-        caption="/spec h1",
-        document=doc,
+        caption="/spec h2026",
+        document=document,
         caption_entities=[MessageEntity(type="bot_command", offset=0, length=5)],
     )
     await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), message=message))
-    assert "tz.pdf" in await shown(app, ADMIN)
-    await send(app, "/site h1 https://hack.example.org")
-    await send(app, "/links h1", ALICE)
-    document = [m for m in session.requests if isinstance(m, SendDocument)][-1]
-    assert document.document == "FILE_ID"
-    assert "hack.example.org" in document.caption
+    assert await app["storage"].hackathons.get_by_id(hack.id) == hack
+    assert app["session"].texts() == []
 
 
 async def test_foreign_chat_and_private(app):
     session = app["session"]
-    await send(app, "/hacks", ALICE, chat_id=FOREIGN_CHAT)
+    await send(app, "/hack", ALICE, chat_id=FOREIGN_CHAT)
     assert any(isinstance(m, LeaveChat) and m.chat_id == FOREIGN_CHAT for m in session.requests)
     assert session.texts() == []
-
-    await send(app, "/whoami", ALICE, chat_id=USER_ID)
-    assert session.last_text() == f"Ваш user_id: <code>{USER_ID}</code>"
-    count = len(session.texts())
-    await send(app, "/hacks", ALICE, chat_id=USER_ID)
+    await app["storage"].github_links.set_login(USER_ID, "alice-gh")
     await send(app, "/me", ALICE, chat_id=USER_ID)
-    assert len(session.texts()) == count
+    assert session.last_text() == f"Ваш user_id: <code>{USER_ID}</code>"
+    before = len(session.requests)
+    for command in ("/help", "/hack", "/github", "/whoami"):
+        await send(app, command, ALICE, chat_id=USER_ID)
+    assert await press(app, "my:me", ALICE, chat_id=USER_ID) == []
+    assert session.requests[before:] == []
 
 
-async def test_delete_confirmation_requires_admin(app):
-    await send(app, "/hack_new h1 01.12.2026 23:59 05.12.2026 10:00 07.12.2026 18:00")
-    hack = await app["storage"].hackathons.get(ALLOWED_CHAT, "h1")
-    message = Message(
-        message_id=1,
-        date=datetime(2026, 10, 26, tzinfo=UTC),
-        chat=Chat(id=ALLOWED_CHAT, type="supergroup"),
-        from_user=ADMIN,
-        text="confirm?",
-    )
-    for presser in (ALICE, ADMIN):
-        callback = CallbackQuery(
-            id=str(next(_ids)),
-            from_user=presser,
-            chat_instance="x",
-            data=f"hdel:{hack.id}:y",
-            message=message,
-        )
-        await app["dp"].feed_update(
-            app["bot"], Update(update_id=next(_ids), callback_query=callback)
-        )
-        exists = await app["storage"].hackathons.get_by_id(hack.id)
-        assert (exists is not None) == (presser is ALICE)
+async def test_private_reminders_still_work(app):
+    app["ctx"].settings.allowed_chat_ids.add(ADMIN_ID)
+    hack = await create_hack(app, ADMIN_ID)
+    await app["storage"].hackathons.add_member(hack.id, ADMIN_ID)
+    await send(app, "/me", chat_id=ADMIN_ID)
+    now = datetime(2026, 12, 5, 6, 0, tzinfo=UTC)
+    await app["ctx"].reminders.tick(now)
+    assert "до начала хакатона" in app["session"].last_text()
+    assert "@admin_user" in app["session"].last_text()
+    count = len(app["session"].texts())
+    await app["ctx"].reminders.tick(now)
+    assert len(app["session"].texts()) == count
 
 
-async def test_setup_mode_chatid(storage):
+async def test_setup_mode_uses_help_and_me(storage):
     settings = make_settings(allowed_chat_ids=set())
     session = MockSession()
     bot = Bot("123:TEST", session=session)
-    ctx = build_context(settings, bot, storage, GitHubClient(None))
+    github = GitHubClient(None)
+    ctx = build_context(settings, bot, storage, github)
     app = {"bot": bot, "dp": build_dispatcher(ctx), "session": session}
-    await send(app, "/chatid", ALICE, chat_id=FOREIGN_CHAT)
-    assert f"<code>{FOREIGN_CHAT}</code>" in session.last_text()
-    await send(app, "/help", ALICE, chat_id=FOREIGN_CHAT)
-    assert len(session.texts()) == 1
-    assert not any(isinstance(m, LeaveChat) for m in session.requests)
+    try:
+        await send(app, "/help", ALICE, chat_id=FOREIGN_CHAT)
+        assert f"<code>{FOREIGN_CHAT}</code>" in session.last_text()
+        await send(app, "/me", ALICE, chat_id=USER_ID)
+        assert session.last_text() == f"Ваш user_id: <code>{USER_ID}</code>"
+        count = len(session.texts())
+        await send(app, "/hack", ALICE, chat_id=FOREIGN_CHAT)
+        await send(app, "/github", ALICE, chat_id=USER_ID)
+        assert len(session.texts()) == count
+        assert not any(isinstance(m, LeaveChat) for m in session.requests)
+    finally:
+        await github.close()

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from html import escape
 
-from aiogram import F, Router
-from aiogram.enums import ChatType
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -21,7 +20,6 @@ from bot.services.formatting import issue_link
 from bot.services.task_status import STATUS_TITLES
 
 router = Router(name="tasks")
-router.message.filter(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 
 OTHERS_ADMIN_ONLY = "Задачи других назначает и снимает только админ бота"
 
