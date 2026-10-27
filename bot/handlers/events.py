@@ -12,7 +12,7 @@ from aiogram.types import ChatMemberUpdated, ErrorEvent, Message
 from bot.context import AppContext
 from bot.errors import UserError
 from bot.middlewares.security import status_value
-from bot.respond import fits_popup, html_to_plain, respond
+from bot.respond import fits_popup, html_to_plain, personal_reply, respond
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ async def on_user_error(event: ErrorEvent, ctx: AppContext | None = None) -> Non
         if event.update.message and ctx is not None:
             await respond(message, text, ctx)
         else:
-            await message.answer(text)
+            await personal_reply(callback or message, text)
     except Exception as exc:
         log.warning("Could not deliver an error message: %s", exc)
 
@@ -81,6 +81,9 @@ async def on_unexpected_error(event: ErrorEvent) -> None:
     if message is None:
         return
     try:
-        await message.answer("⚠️ Внутренняя ошибка, подробности в логе бота")
+        await personal_reply(
+            event.update.callback_query or message,
+            "⚠️ Внутренняя ошибка. Данные черновика сохранены; откройте /hack повторно",
+        )
     except Exception as exc:
         log.warning("Could not deliver an error message: %s", exc)

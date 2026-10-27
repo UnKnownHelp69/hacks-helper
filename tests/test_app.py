@@ -74,6 +74,7 @@ async def test_four_commands_replace_every_menu_scope():
     assert [call.kwargs["scope"].chat_id for call in calls[3:]] == [-1001, ADMIN_ID]
     for call in calls:
         assert [command.command for command in call.args[0]] == ["help", "hack", "me", "github"]
+        assert all(command.is_ephemeral for command in call.args[0])
 
 
 def test_settings_parsing(monkeypatch, tmp_path):

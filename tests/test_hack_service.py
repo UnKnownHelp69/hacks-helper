@@ -49,6 +49,26 @@ async def test_member_leaving_group_loses_draft_access(service, storage, fake_bo
         await service.session(USER_ID, session.token)
 
 
+async def test_editing_existing_hack_does_not_depend_on_unchanged_github_repo(
+    service, storage, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    session, fields = await draft(storage)
+    session.data.update(fields, repo="team/project")
+    await storage.workflow.save_session(session)
+    hack_id = await service.publish(session)
+    edit = await service.edit(hack_id, USER_ID)
+    edit.data["title"] = "Новое название"
+    await storage.workflow.save_session(edit)
+    service.github.token = "test"
+    get_repo = AsyncMock(side_effect=UserError("GitHub недоступен"))
+    monkeypatch.setattr(service.github, "get_repo", get_repo)
+    await service.publish(edit)
+    assert (await storage.hackathons.get_by_id(hack_id)).title == "Новое название"
+    get_repo.assert_not_awaited()
+
+
 async def test_imported_post_is_a_persistent_owner_bound_draft(service, storage):
     session = await service.import_post(
         ALLOWED_CHAT, USER_ID, "Хакатон: начало 5 ноября 2026 в 10:00"
@@ -56,6 +76,18 @@ async def test_imported_post_is_a_persistent_owner_bound_draft(service, storage)
     assert session.step == "preview" and session.data["start_at"].endswith("+00:00")
     assert (await storage.workflow.session(USER_ID, session.token)).data == session.data
     assert await storage.workflow.session(OTHER_ID, session.token) is None
+
+
+async def test_explicit_import_keeps_a_draft_when_site_cannot_be_read(service, monkeypatch):
+    async def unavailable(url):
+        raise UserError("Сайт недоступен")
+
+    monkeypatch.setattr("bot.services.hackathons.fetch_public_page", unavailable)
+    session = await service.import_post(
+        ALLOWED_CHAT, USER_ID, "https://event.example/", explicit=True
+    )
+    assert session.data["site_url"] == "https://event.example/"
+    assert session.data["import_error"] == "Сайт недоступен"
 
 
 def test_validation_rejects_missing_dates_and_invalid_team_bounds():

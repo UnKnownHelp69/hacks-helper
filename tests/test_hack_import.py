@@ -54,6 +54,21 @@ def test_missing_post_data_stays_empty():
     assert result["start_at"] == "2026-11-05T07:00:00+00:00"
 
 
+def test_russian_date_range_and_invalid_deep_metadata():
+    result = extract_post("Хакатон команды\nПройдёт 3–5 ноября 2026\nКоманды: 2–4 человека", MSK)
+    assert result["start_at"] == "2026-11-02T21:00:00+00:00"
+    assert result["end_at"] == "2026-11-05T20:59:00+00:00"
+    assert result["team_min"] == 2
+    html = (
+        '<h1>Хакатон</h1><script type="application/ld+json">'
+        + "[" * 2000
+        + "0"
+        + "]" * 2000
+        + "</script>"
+    )
+    assert extract_page(html, "https://hack.example/", MSK)["is_hackathon"]
+
+
 @pytest.mark.parametrize(
     "url",
     [

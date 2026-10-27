@@ -67,7 +67,7 @@ class Hackathon:
 
     @property
     def display_name(self) -> str:
-        return f"{self.title} ({self.slug})" if self.title else self.slug
+        return self.title or self.slug
 
     def milestone_at(self, milestone: str) -> datetime:
         return {

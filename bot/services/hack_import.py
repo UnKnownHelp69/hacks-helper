@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import re
@@ -42,6 +43,12 @@ MONTHS = {
 WORD_DATE_RE = re.compile(
     r"(?P<day>\d{1,2})\s+(?P<month>" + "|".join(MONTHS) + r")\s+(?P<year>20\d{2})"
     r"(?:\s*(?:в|,)?\s*(?P<hour>\d{1,2}):(?P<minute>\d{2}))?",
+    re.IGNORECASE,
+)
+RANGE_RE = re.compile(
+    r"(?P<first>\d{1,2})\s*[-–—]\s*(?P<last>\d{1,2})\s+(?P<month>"
+    + "|".join(MONTHS)
+    + r")\s+(?P<year>20\d{2})",
     re.IGNORECASE,
 )
 
@@ -101,13 +108,16 @@ async def fetch_public_page(url: str) -> tuple[str, str]:
     resolver = PublicResolver()
     try:
         connector = aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False)
-        async with aiohttp.ClientSession(
-            connector=connector,
-            timeout=aiohttp.ClientTimeout(total=15),
-            cookie_jar=aiohttp.DummyCookieJar(),
-            auto_decompress=False,
-            headers={"User-Agent": "hacks-helper/1.0", "Accept-Encoding": "identity"},
-        ) as session:
+        async with (
+            aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=15),
+                cookie_jar=aiohttp.DummyCookieJar(),
+                auto_decompress=False,
+                headers={"User-Agent": "hacks-helper/1.0", "Accept-Encoding": "identity"},
+            ) as session,
+            asyncio.timeout(20),
+        ):
             for _ in range(5):
                 async with session.get(current, allow_redirects=False) as response:
                     if response.status in {301, 302, 303, 307, 308}:
@@ -164,7 +174,7 @@ class PageParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag in {"script", "style", "noscript"}:
             if self._json:
-                with suppress(ValueError):
+                with suppress(ValueError, RecursionError):
                     self.structured.append(json.loads("".join(self._script)))
             self._hidden = max(0, self._hidden - 1)
             self._json = False
@@ -189,6 +199,14 @@ def _iso(raw: Any, tz: ZoneInfo) -> str | None:
 
 
 def _line_dates(line: str, tz: ZoneInfo, *, end_of_day: bool = False) -> list[str]:
+    if match := RANGE_RE.search(line):
+        try:
+            month = MONTHS[match["month"].lower()]
+            first = datetime(int(match["year"]), month, int(match["first"]), tzinfo=tz)
+            last = datetime(int(match["year"]), month, int(match["last"]), 23, 59, tzinfo=tz)
+            return [first.astimezone(UTC).isoformat(), last.astimezone(UTC).isoformat()]
+        except ValueError:
+            return []
     values = []
     for pattern in (DATE_RE, WORD_DATE_RE):
         for match in pattern.finditer(line):
@@ -205,8 +223,8 @@ def _line_dates(line: str, tz: ZoneInfo, *, end_of_day: bool = False) -> list[st
                 )
             except ValueError:
                 continue
-            values.append(value.astimezone(UTC).isoformat())
-    return values
+            values.append((match.start(), value.astimezone(UTC).isoformat()))
+    return [value for _, value in sorted(values)]
 
 
 def extract_post(text: str, tz: ZoneInfo) -> dict[str, Any]:
@@ -247,7 +265,7 @@ def extract_post(text: str, tz: ZoneInfo) -> dict[str, Any]:
                 result["start_at"] = dates[0]
             elif dates and re.search(r"конец|окончани|финиш|завершени", lower):
                 result["end_at"] = dates[0]
-        if "команд" in lower or "team" in lower:
+        if ("команд" in lower or "team" in lower) and not RANGE_RE.search(line):
             limits = re.search(r"(?:от\s*)?(\d{1,2})\s*(?:до|[-–—])\s*(\d{1,2})", lower)
             exact = re.search(r"(?:из|ровно)\s*(\d{1,2})\s*(?:человек|участник)", lower)
             if limits and 1 <= int(limits[1]) <= int(limits[2]) <= 100:
@@ -262,18 +280,22 @@ def extract_post(text: str, tz: ZoneInfo) -> dict[str, Any]:
 
 
 def _events(value: Any):
-    if isinstance(value, list):
-        for item in value:
-            yield from _events(item)
-    elif isinstance(value, dict):
-        types = value.get("@type", [])
-        if isinstance(types, str):
-            types = [types]
-        if any(str(kind).endswith("Event") for kind in types):
-            yield value
-        for item in value.values():
-            if isinstance(item, (list, dict)):
-                yield from _events(item)
+    pending = [value]
+    for _ in range(10000):
+        if not pending:
+            break
+        item = pending.pop()
+        if isinstance(item, list):
+            pending.extend(reversed(item))
+        elif isinstance(item, dict):
+            types = item.get("@type", [])
+            if isinstance(types, str):
+                types = [types]
+            if isinstance(types, list) and any(str(kind).endswith("Event") for kind in types):
+                yield item
+            pending.extend(
+                value for value in reversed(list(item.values())) if isinstance(value, (list, dict))
+            )
 
 
 def extract_page(html: str, url: str, tz: ZoneInfo) -> dict[str, Any]:

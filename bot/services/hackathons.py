@@ -78,7 +78,14 @@ class HackathonService:
     async def publish(self, session: HackSession) -> int:
         await self.require_access(session.chat_id, session.user_id)
         fields = validate_hack(session.data)
-        if fields.get("repo") and self.github.configured:
+        previous = None
+        if session.data.get("editing_id"):
+            previous = await self.hackathon(int(session.data["editing_id"]), session.user_id)
+        if (
+            fields.get("repo")
+            and self.github.configured
+            and (previous is None or previous.repo != fields["repo"])
+        ):
             await self.github.get_repo(fields["repo"])
         return await self.storage.workflow.publish_draft(session, fields)
 
@@ -92,8 +99,10 @@ class HackathonService:
         await self.hackathon(hack_id, user_id)
         return await self.storage.workflow.join_team(hack_id, user_id, team_id, overflow=overflow)
 
-    async def import_post(self, chat_id: int, user_id: int, text: str) -> HackSession | None:
-        if not HACK_RE.search(text) and not URL_RE.search(text):
+    async def import_post(
+        self, chat_id: int, user_id: int, text: str, *, explicit: bool = False
+    ) -> HackSession | None:
+        if not explicit and not HACK_RE.search(text) and not URL_RE.search(text):
             return None
         await self.require_access(chat_id, user_id)
         tz = await chat_zone(self.storage, chat_id, self.settings.default_timezone)
@@ -108,7 +117,18 @@ class HackathonService:
                 ),
                 None,
             )
-        recognized = bool(HACK_RE.search(text))
+        recognized = explicit or bool(HACK_RE.search(text))
+        if explicit and not data.get("title"):
+            title = next(
+                (
+                    line.strip()
+                    for line in text.splitlines()
+                    if line.strip() and not URL_RE.fullmatch(line.strip())
+                ),
+                None,
+            )
+            if title:
+                data["title"] = title[:100]
         if source:
             try:
                 source = public_url(source)

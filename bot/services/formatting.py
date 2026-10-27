@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from html import escape
+import re
+from html import escape, unescape
 
 TELEGRAM_LIMIT = 4096
 SAFE_LIMIT = 3900
@@ -11,21 +12,26 @@ SAFE_LIMIT = 3900
 def split_message(text: str, limit: int = SAFE_LIMIT) -> list[str]:
     """Split text into chunks on line boundaries.
 
-    Each line is expected to be self-contained HTML, so splitting between lines
-    never breaks markup. Overlong single lines are hard-cut (rare: issue titles
-    are limited to 256 chars by GitHub).
+    Count visible UTF-16 units, preserving complete HTML links and entities.
+    An overlong single line is shortened as escaped plain text.
     """
     chunks: list[str] = []
     current: list[str] = []
     size = 0
     for line in text.split("\n"):
-        if len(line) > limit:
-            line = line[: limit - 1] + "…"
-        extra = len(line) + (1 if current else 0)
+        plain = unescape(re.sub(r"<[^>]+>", "", line))
+        units = len(plain.encode("utf-16-le")) // 2
+        if units > limit:
+            clipped = plain.encode("utf-16-le")[: (limit - 1) * 2].decode(
+                "utf-16-le", errors="ignore"
+            )
+            line = escape(clipped) + "…"
+            units = len((clipped + "…").encode("utf-16-le")) // 2
+        extra = units + (1 if current else 0)
         if current and size + extra > limit:
             chunks.append("\n".join(current))
             current, size = [], 0
-            extra = len(line)
+            extra = units
         current.append(line)
         size += extra
     if current:

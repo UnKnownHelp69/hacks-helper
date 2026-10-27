@@ -16,7 +16,6 @@ from aiogram.types import (
 from bot.middlewares.admin import AdminOnlyMiddleware
 from bot.middlewares.security import (
     ADMIN_ONLY_TEXT,
-    SENDER_CHAT_REFUSAL,
     SecurityMiddleware,
     command_name,
     is_bot_admin,
@@ -179,7 +178,7 @@ async def test_sender_chat_commands_are_refused(fake_bot, replies):
         sender_chat=group(),
     )
     assert not await mw.check(update_with(msg), fake_bot)
-    assert replies == [SENDER_CHAT_REFUSAL]
+    assert replies == []  # Anonymous Telegram users cannot receive a personal response.
 
 
 # --- level 2: bot admins by user_id ---

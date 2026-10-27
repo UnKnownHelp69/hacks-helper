@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Any
 
@@ -62,22 +62,15 @@ class HackWorkflowRepo:
                         step,
                         json.dumps(session.data),
                         to_db(session.expires_at),
-                        to_db(now),
+                        datetime.now(UTC).isoformat(),
                     ),
                 ),
             ]
         )
         return session
 
-    async def session(self, user_id: int, token: str | None = None) -> HackSession | None:
-        sql = "SELECT * FROM hack_sessions WHERE user_id = ? AND expires_at > ?"
-        params: tuple = (user_id, to_db(utcnow()))
-        if token is not None:
-            sql += " AND token = ?"
-            params += (token,)
-        row = await self.db.fetchone(sql + " ORDER BY updated_at DESC, rowid DESC LIMIT 1", params)
-        if row is None:
-            return None
+    @staticmethod
+    def _session(row: aiosqlite.Row) -> HackSession:
         return HackSession(
             row["user_id"],
             row["chat_id"],
@@ -88,6 +81,31 @@ class HackWorkflowRepo:
             row["revision"],
         )
 
+    async def session(
+        self, user_id: int, token: str | None = None, *, chat_id: int | None = None
+    ) -> HackSession | None:
+        sql = "SELECT * FROM hack_sessions WHERE user_id = ? AND expires_at > ?"
+        params: tuple = (user_id, to_db(utcnow()))
+        if token is not None:
+            sql += " AND token = ?"
+            params += (token,)
+        if chat_id is not None:
+            sql += " AND chat_id = ?"
+            params += (chat_id,)
+        row = await self.db.fetchone(sql + " ORDER BY updated_at DESC, rowid DESC LIMIT 1", params)
+        if row is None:
+            return None
+        return self._session(row)
+
+    async def drafts(self, user_id: int, chat_id: int) -> list[HackSession]:
+        rows = await self.db.fetchall(
+            "SELECT * FROM hack_sessions WHERE user_id=? AND chat_id=? AND expires_at>? "
+            "AND (step='preview' OR step LIKE 'input:%' OR step='checkpoints') "
+            "ORDER BY updated_at DESC,rowid DESC",
+            (user_id, chat_id, to_db(utcnow())),
+        )
+        return [self._session(row) for row in rows]
+
     async def save_session(self, session: HackSession) -> None:
         changed = await self.db.execute(
             "UPDATE hack_sessions SET step=?,data=?,updated_at=?,revision=revision+1 "
@@ -95,7 +113,7 @@ class HackWorkflowRepo:
             (
                 session.step,
                 json.dumps(session.data),
-                to_db(utcnow()),
+                datetime.now(UTC).isoformat(),
                 session.token,
                 session.user_id,
                 session.revision,
@@ -374,6 +392,12 @@ class HackWorkflowRepo:
                     "INSERT OR IGNORE INTO hack_checkpoints(hackathon_id,title,at) VALUES(?,?,?)",
                     (hack_id, checkpoint["title"], checkpoint["at"]),
                 )
+            current_hack = await _one(conn, "SELECT * FROM hackathons WHERE id=?", (hack_id,))
+            async with conn.execute(
+                "SELECT id FROM hack_teams WHERE hackathon_id=?", (hack_id,)
+            ) as cursor:
+                for team in await cursor.fetchall():
+                    await self._formed(conn, current_hack, team["id"])
             stored["published_id"] = hack_id
             await conn.execute(
                 "UPDATE hack_sessions SET data=?,step='published',revision=revision+1 "

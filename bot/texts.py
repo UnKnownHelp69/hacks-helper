@@ -13,12 +13,17 @@ BOT_COMMANDS: list[tuple[str, str]] = [
 
 
 def bot_commands() -> list[BotCommand]:
-    return [BotCommand(command=name, description=description) for name, description in BOT_COMMANDS]
+    return [
+        BotCommand(command=name, description=description, is_ephemeral=True)
+        for name, description in BOT_COMMANDS
+    ]
 
 
 HELP_TEXT = """<b>Команды бота</b>
 
 /help — справка
-/hack — список хакатонов; /hack &lt;название&gt; — карточка
+/hack — хакатоны, создание, голосование и команды
 /me — мой профиль
-/github — аккаунт GitHub и состояние интеграции"""
+/github — аккаунт GitHub и состояние интеграции
+
+Личные действия доступны по кнопкам. Карточки, голосования и оповещения видны всему чату."""

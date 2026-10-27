@@ -7,13 +7,12 @@ from aiogram.types import CallbackQuery, Message
 
 from bot.context import AppContext
 from bot.handlers.views import PERSONAL_VIEWS
-from bot.respond import NO_PREVIEW, fits_popup, html_to_plain
-from bot.services.formatting import split_message
+from bot.respond import fits_popup, html_to_plain, personal_reply
 
 router = Router(name="popups")
 
 EXPIRED = "Ответ устарел, повторите команду"
-POSTED_TO_CHAT = "Ответ длинный, отправил в чат"
+POSTED_TO_CHAT = "Ответ показан личным сообщением"
 
 
 @router.callback_query(F.data.startswith("pop:"))
@@ -40,5 +39,4 @@ async def cb_personal(callback: CallbackQuery, ctx: AppContext) -> None:
         await callback.answer(html_to_plain(text), show_alert=True)
         return
     await callback.answer(POSTED_TO_CHAT)
-    for chunk in split_message(text):
-        await message.answer(chunk, link_preview_options=NO_PREVIEW)
+    await personal_reply(callback, text)

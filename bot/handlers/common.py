@@ -17,9 +17,10 @@ router = Router(name="common")
 @router.message(Command("help"))
 async def cmd_help(message: Message, ctx: AppContext) -> None:
     if ctx.settings.setup_mode:
-        await message.reply(
+        await reply(
+            message,
             f"chat_id: <code>{message.chat.id}</code>\n"
-            "Добавьте в ALLOWED_CHAT_IDS и перезапустите бота."
+            "Добавьте в ALLOWED_CHAT_IDS и перезапустите бота.",
         )
         return
     await reply(message, HELP_TEXT)
@@ -30,7 +31,7 @@ async def cmd_me(message: Message, ctx: AppContext) -> None:
     assert message.from_user is not None
     if not ctx.settings.is_chat_allowed(message.chat.id):
         # Before setup, reveal only the caller's own id, without reusable buttons.
-        await message.answer(f"Ваш user_id: <code>{message.from_user.id}</code>")
+        await reply(message, f"Ваш user_id: <code>{message.from_user.id}</code>")
         return
     text = await me_view(ctx, message.chat.id, message.from_user)
     await respond(message, text, ctx, personal="me")

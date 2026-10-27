@@ -1,43 +1,32 @@
-"""Answering commands: short answers go to a popup, long ones to the chat.
-
-Telegram has no per-user messages in groups. A short answer (<= 200 characters,
-the popup limit) is therefore posted as a small message with a button; whoever
-presses it sees the answer in a popup visible only to them. Longer answers are
-posted to the chat as usual.
-
-"Personal" buttons (my tasks, my profile, my schedule) are computed for the
-person who presses them, so one button serves everyone.
-"""
+"""Personal replies: native ephemeral group messages, ordinary replies in private chats."""
 
 from __future__ import annotations
 
 import re
-from html import escape, unescape
+from datetime import UTC, datetime
+from html import unescape
+from typing import TYPE_CHECKING, Any
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import (
+    CallbackQuery,
+    EphemeralMessageParameters,
+    ForceReply,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    Message,
+    ReplyParameters,
+)
 
-from bot.context import AppContext
+from bot.errors import UserError
 from bot.services.formatting import split_message
 
-POPUP_LIMIT = 200  # Telegram limit for callback query answers
+if TYPE_CHECKING:
+    from bot.context import AppContext
 
-PERSONAL_LABELS = {
-    "me": "👀 Мой профиль",
-    "tasks": "👀 Мои задачи",
-    "avail": "👀 Моё расписание",
-}
-
-_TAG_RE = re.compile(r"<[^>]+>")
+POPUP_LIMIT = 200
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
-
-
-async def reply(message: Message, text: str) -> None:
-    """Reply with HTML in the chat, split to respect Telegram limits."""
-    for index, chunk in enumerate(split_message(text)):
-        if index == 0:
-            await message.reply(chunk, link_preview_options=NO_PREVIEW)
-        else:
-            await message.answer(chunk, link_preview_options=NO_PREVIEW)
+_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def html_to_plain(text: str) -> str:
@@ -49,27 +38,101 @@ def fits_popup(text: str) -> bool:
     return 0 < len(plain.encode("utf-16-le")) // 2 <= POPUP_LIMIT
 
 
-def _command_echo(message: Message) -> str:
-    line = (message.text or message.caption or "").split("\n", 1)[0].strip()
-    return line[:60] + ("…" if len(line) > 60 else "")
+def personal_options(event: Message | CallbackQuery, *, overlay: bool = False) -> dict[str, Any]:
+    message = event.message if isinstance(event, CallbackQuery) else event
+    user = event.from_user
+    if not isinstance(message, Message) or user is None or user.is_bot:
+        raise UserError("Личный ответ недоступен. Отправьте /hack от своего имени")
+    options: dict[str, Any] = {"chat_id": message.chat.id}
+    if message.chat.type in {"group", "supergroup"}:
+        if (
+            isinstance(event, CallbackQuery)
+            and message.receiver_user
+            and message.receiver_user.id != user.id
+        ):
+            raise UserError("Это личное сообщение другого пользователя")
+        options["ephemeral_message_parameters"] = EphemeralMessageParameters(
+            receiver_user_id=user.id,
+            callback_query_id=event.id if isinstance(event, CallbackQuery) else None,
+            replace_callback_query_message=(
+                overlay and message.ephemeral_message_id is None
+                if isinstance(event, CallbackQuery)
+                else False
+            ),
+        )
+        if (
+            isinstance(event, Message)
+            and message.ephemeral_message_id is not None
+            and (datetime.now(UTC) - message.date).total_seconds() < 12
+        ):
+            options["reply_parameters"] = ReplyParameters(
+                ephemeral_message_id=message.ephemeral_message_id, allow_sending_without_reply=False
+            )
+    return options
 
 
-def _button(label: str, data: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=data)]]
-    )
+async def personal_reply(
+    event: Message | CallbackQuery,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | ForceReply | None = None,
+    edit: bool = True,
+) -> Message | bool:
+    """Never retry a failed private delivery as a public group message."""
+    options = personal_options(event, overlay=edit and not isinstance(reply_markup, ForceReply))
+    message = event.message if isinstance(event, CallbackQuery) else event
+    chunks = split_message(text)
+    if (
+        isinstance(event, CallbackQuery)
+        and edit
+        and len(chunks) == 1
+        and not isinstance(reply_markup, ForceReply)
+    ):
+        try:
+            if message.ephemeral_message_id is not None:
+                return await event.bot.edit_ephemeral_message_text(
+                    chat_id=message.chat.id,
+                    receiver_user_id=event.from_user.id,
+                    ephemeral_message_id=message.ephemeral_message_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                    link_preview_options=NO_PREVIEW,
+                )
+            if message.chat.type == "private":
+                return await event.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                    link_preview_options=NO_PREVIEW,
+                )
+        except TelegramBadRequest as exc:
+            if "not modified" in exc.message.lower():
+                return True
+            if (
+                "not found" not in exc.message.lower()
+                and "can't be edited" not in exc.message.lower()
+            ):
+                raise
+    result: Message | bool = False
+    for index, chunk in enumerate(chunks):
+        result = await event.bot.send_message(
+            **options,
+            text=chunk,
+            parse_mode="HTML",
+            link_preview_options=NO_PREVIEW,
+            reply_markup=reply_markup if index == len(chunks) - 1 else None,
+        )
+    return result
+
+
+async def reply(message: Message, text: str) -> None:
+    await personal_reply(message, text)
 
 
 async def respond(
     message: Message, text: str, ctx: AppContext, *, personal: str | None = None
 ) -> None:
-    """Answer a command: popup behind a button if it fits, otherwise a chat message."""
-    if not fits_popup(text):
-        await reply(message, text)
-        return
-    if personal is not None:
-        markup = _button(PERSONAL_LABELS[personal], f"my:{personal}")
-    else:
-        popup_id = await ctx.storage.popups.add(message.chat.id, html_to_plain(text))
-        markup = _button("👀 Показать ответ", f"pop:{popup_id}")
-    await message.reply(f"👀 {escape(_command_echo(message))}", reply_markup=markup)
+    await personal_reply(message, text)

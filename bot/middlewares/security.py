@@ -19,6 +19,7 @@ from aiogram.enums import ChatType
 from aiogram.types import CallbackQuery, Chat, Message, TelegramObject, Update, User
 
 from bot.config import Settings
+from bot.respond import personal_reply
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +128,10 @@ class SecurityMiddleware(BaseMiddleware):
     async def check(self, update: Update, bot: Any) -> bool:
         """Return True if the update may reach handlers."""
         settings = self.settings
+        if update.callback_query and update.callback_query.message:
+            receiver = getattr(update.callback_query.message, "receiver_user", None)
+            if receiver and receiver.id != update.callback_query.from_user.id:
+                return False
 
         if update.my_chat_member:
             event = update.my_chat_member
@@ -182,9 +187,9 @@ class SecurityMiddleware(BaseMiddleware):
 
         if message is not None and message.sender_chat is not None:
             # Anonymous admins and channel posts: never treated as users.
-            if command_name(message):
+            if command_name(message) and message.from_user and not message.from_user.is_bot:
                 try:
-                    await message.reply(SENDER_CHAT_REFUSAL)
+                    await personal_reply(message, SENDER_CHAT_REFUSAL)
                 except Exception as exc:
                     log.debug("Could not reply to a sender_chat message: %s", exc)
             return False

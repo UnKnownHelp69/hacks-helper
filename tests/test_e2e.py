@@ -16,6 +16,8 @@ from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (
     AnswerCallbackQuery,
+    EditEphemeralMessageText,
+    EditMessageText,
     GetChatMember,
     GetMe,
     LeaveChat,
@@ -28,6 +30,8 @@ from aiogram.types import (
     Chat,
     ChatMemberMember,
     Document,
+    ForceReply,
+    InlineKeyboardMarkup,
     Message,
     MessageEntity,
     Update,
@@ -51,6 +55,8 @@ class MockSession(BaseSession):
         super().__init__()
         self.requests: list[TelegramMethod[Any]] = []
         self.members: dict[int, User] = {}
+        self.messages: list[Message] = []
+        self.addresses: dict[tuple, Message] = {}
 
     async def close(self) -> None:
         pass
@@ -62,14 +68,40 @@ class MockSession(BaseSession):
         self.requests.append(method)
         now = datetime(2026, 10, 26, tzinfo=UTC)
         if isinstance(method, (SendMessage, SendDocument)):
-            return Message(
-                message_id=next(_ids),
+            ephemeral = getattr(method, "ephemeral_message_parameters", None)
+            identifier = next(_ids)
+            receiver = self.members.get(ephemeral.receiver_user_id) if ephemeral else None
+            if ephemeral and receiver is None:
+                receiver = User(id=ephemeral.receiver_user_id, is_bot=False, first_name="User")
+            message = Message(
+                message_id=0 if ephemeral else identifier,
+                ephemeral_message_id=identifier if ephemeral else None,
+                receiver_user=receiver,
+                from_user=User(id=BOT_ID, is_bot=True, first_name="Bot"),
                 date=now,
                 chat=Chat(
                     id=method.chat_id, type="private" if method.chat_id > 0 else "supergroup"
                 ),
                 text=getattr(method, "text", None),
+                reply_markup=method.reply_markup
+                if isinstance(method.reply_markup, InlineKeyboardMarkup)
+                else None,
             )
+            self.messages.append(message)
+            self.addresses[(method.chat_id, bool(ephemeral), identifier)] = message
+            return message
+        if isinstance(method, (EditEphemeralMessageText, EditMessageText)):
+            ephemeral = isinstance(method, EditEphemeralMessageText)
+            identifier = method.ephemeral_message_id if ephemeral else method.message_id
+            address = (method.chat_id, ephemeral, identifier)
+            message = self.addresses.get(address)
+            if message:
+                message = message.model_copy(
+                    update={"text": method.text, "reply_markup": method.reply_markup}
+                )
+                self.addresses[address] = message
+                self.messages.append(message)
+            return True
         if isinstance(method, GetChatMember):
             if method.user_id in self.members:
                 return ChatMemberMember(user=self.members[method.user_id])
@@ -79,7 +111,11 @@ class MockSession(BaseSession):
         return True
 
     def texts(self) -> list[str]:
-        return [m.text for m in self.requests if isinstance(m, SendMessage)]
+        return [
+            m.text
+            for m in self.requests
+            if isinstance(m, (SendMessage, EditMessageText, EditEphemeralMessageText)) and m.text
+        ]
 
     def last_text(self) -> str:
         return self.texts()[-1]
@@ -132,7 +168,7 @@ async def app(storage):
     yield {"bot": bot, "dp": dp, "session": session, "ctx": ctx, "storage": storage}
     await github.close()
     # no handler may crash: unexpected exceptions produce this message
-    assert not any("Внутренняя ошибка" in t for t in session.texts())
+    assert not any("Внутренняя ошибка" in (message.text or "") for message in session.messages)
 
 
 def tg_user(user_id: int, username: str | None, name: str = "User") -> User:
@@ -150,9 +186,11 @@ async def send(app, text: str, sender: User = ADMIN, chat_id: int = ALLOWED_CHAT
     if command and entities is None:
         entities = [MessageEntity(type="bot_command", offset=0, length=len(command))]
     chat_type = "private" if chat_id > 0 else "supergroup"
+    ephemeral = kw.pop("ephemeral", False)
     message = Message(
-        message_id=next(_ids),
-        date=datetime(2026, 10, 26, tzinfo=UTC),
+        message_id=0 if ephemeral else next(_ids),
+        date=datetime.now(UTC),
+        ephemeral_message_id=next(_ids) if ephemeral else None,
         chat=Chat(id=chat_id, type=chat_type, title=None if chat_id > 0 else "Team"),
         from_user=sender,
         text=text,
@@ -163,30 +201,15 @@ async def send(app, text: str, sender: User = ADMIN, chat_id: int = ALLOWED_CHAT
 
 
 async def shown(app, presser: User) -> str:
-    """What ``presser`` sees for the last answer: the popup text or the chat message."""
+    """Last text visible to the requesting user."""
     session = app["session"]
-    last = [m for m in session.requests if isinstance(m, SendMessage)][-1]
-    markup = last.reply_markup
-    data = markup.inline_keyboard[0][0].callback_data if markup else None
-    if not data or not data.startswith(("pop:", "my:")):
-        return last.text
-    message = Message(
-        message_id=next(_ids),
-        date=datetime(2026, 10, 26, tzinfo=UTC),
-        chat=Chat(id=last.chat_id, type="private" if last.chat_id > 0 else "supergroup"),
-        text=last.text,
-    )
-    callback = CallbackQuery(
-        id=str(next(_ids)), from_user=presser, chat_instance="x", data=data, message=message
-    )
-    before = len(session.requests)
-    await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), callback_query=callback))
-    new = session.requests[before:]
-    for method in new:
-        if isinstance(method, AnswerCallbackQuery) and method.show_alert:
-            return method.text
-    # too long for a popup: posted to the chat instead
-    return "\n".join(m.text for m in new if isinstance(m, SendMessage))
+    for message in reversed(session.messages):
+        if message.text and (
+            (message.receiver_user and message.receiver_user.id == presser.id)
+            or message.chat.id == presser.id
+        ):
+            return message.text
+    return session.last_text()
 
 
 async def create_hack(app, chat_id=ALLOWED_CHAT, slug="h2026", title="Хакатон"):
@@ -200,12 +223,29 @@ async def create_hack(app, chat_id=ALLOWED_CHAT, slug="h2026", title="Хакат
     )
 
 
-async def press(app, data, presser=ADMIN, chat_id=ALLOWED_CHAT):
-    message = Message(
-        message_id=next(_ids),
-        date=datetime(2026, 10, 26, tzinfo=UTC),
-        chat=Chat(id=chat_id, type="private" if chat_id > 0 else "supergroup"),
-        text="👀",
+async def press(app, data, presser=ADMIN, chat_id=ALLOWED_CHAT, source=None):
+    message = (
+        source
+        or next(
+            (
+                message
+                for message in reversed(app["session"].messages)
+                if message.chat.id == chat_id
+                and message.reply_markup
+                and any(
+                    item.callback_data == data
+                    for row in message.reply_markup.inline_keyboard
+                    for item in row
+                )
+            ),
+            None,
+        )
+        or Message(
+            message_id=next(_ids),
+            date=datetime(2026, 10, 26, tzinfo=UTC),
+            chat=Chat(id=chat_id, type="private" if chat_id > 0 else "supergroup"),
+            text="👀",
+        )
     )
     callback = CallbackQuery(
         id=str(next(_ids)), from_user=presser, chat_instance="x", data=data, message=message
@@ -213,6 +253,41 @@ async def press(app, data, presser=ADMIN, chat_id=ALLOWED_CHAT):
     before = len(app["session"].requests)
     await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), callback_query=callback))
     return app["session"].requests[before:]
+
+
+def private_panel(app, actor=ALICE, chat_id=ALLOWED_CHAT):
+    return next(
+        message
+        for message in reversed(app["session"].messages)
+        if message.chat.id == chat_id
+        and message.reply_markup
+        and (chat_id > 0 or (message.receiver_user and message.receiver_user.id == actor.id))
+        and any(
+            item.callback_data and item.callback_data.startswith("hk:")
+            for row in message.reply_markup.inline_keyboard
+            for item in row
+        )
+    )
+
+
+async def click(app, label, actor=ALICE, chat_id=ALLOWED_CHAT):
+    panel = private_panel(app, actor, chat_id)
+    item = next(
+        item for row in panel.reply_markup.inline_keyboard for item in row if label in item.text
+    )
+    return await press(app, item.callback_data, actor, chat_id, source=panel)
+
+
+async def answer_form(app, text, actor=ALICE, chat_id=ALLOWED_CHAT, **kwargs):
+    prompt = next(
+        message
+        for message in reversed(app["session"].messages)
+        if message.chat.id == chat_id
+        and message.text
+        and "Ответьте на это личное сообщение" in message.text
+        and (chat_id > 0 or (message.receiver_user and message.receiver_user.id == actor.id))
+    )
+    await send(app, text, actor, chat_id, ephemeral=chat_id < 0, reply_to_message=prompt, **kwargs)
 
 
 @pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, ADMIN_ID])
@@ -226,7 +301,7 @@ async def test_four_public_commands(app, chat_id):
     await send(app, "/me", chat_id=chat_id)
     assert f"id: {ADMIN_ID}" in await shown(app, ADMIN)
     await send(app, "/hack", chat_id=chat_id)
-    assert await shown(app, ADMIN) == "Активных хакатонов нет"
+    assert "Активных хакатонов нет" in await shown(app, ADMIN)
     await send(app, "/github", chat_id=chat_id)
     assert "Аккаунт: не привязан" in app["session"].last_text()
     assert "Интеграция: настроена" in app["session"].last_text()
@@ -241,11 +316,13 @@ async def test_hack_list_and_card_are_chat_scoped(app, chat_id):
     await app["storage"].hackathons.archive(finished.id, finished.end_at)
     await app["storage"].hackathons.add_member(hack.id, ADMIN_ID)
     await send(app, "/hack", chat_id=chat_id)
-    text = await shown(app, ADMIN)
-    assert "Хакатон <команды>" in unescape(text) and "admin_user" in text
-    assert "Чужой хакатон" not in text and "Завершённый хакатон" not in text
+    message = app["session"].messages[-1]
+    labels = [item.text for row in message.reply_markup.inline_keyboard for item in row]
+    assert any("Хакатон <команды>" in label for label in labels)
+    assert not any("Чужой хакатон" in label or "Завершённый хакатон" in label for label in labels)
     await send(app, "/hack h2026", chat_id=chat_id)
     text = await shown(app, ADMIN)
+    assert "Хакатон <команды>" in unescape(text) and "admin_user" in text
     assert "05.12.2026 10:00" in text and "Участники (1)" in text
     await send(app, "/hack nope", chat_id=chat_id)
     assert "не найден, список: /hack" in await shown(app, ADMIN)
@@ -263,20 +340,23 @@ async def test_github_shows_only_callers_account_without_token(app):
     assert "admin-gh" not in text and "Интеграция: не настроена" in text
 
 
-async def test_personal_profile_button_uses_presser(app):
+async def test_personal_profile_is_delivered_only_to_requesting_user(app):
     await send(app, "/me", ALICE)
-    assert app["session"].last_text() == "👀 /me"
+    request = app["session"].requests[-1]
+    assert request.ephemeral_message_parameters.receiver_user_id == USER_ID
     assert f"id: {USER_ID}" in await shown(app, ALICE)
+    await send(app, "/me", ADMIN)
     assert f"id: {ADMIN_ID}" in await shown(app, ADMIN)
 
 
-async def test_long_hack_list_goes_to_chat(app):
+async def test_hack_menu_lists_cards_as_personal_buttons(app):
     for index in range(3):
-        await create_hack(app, slug=f"hack{index}")
+        await create_hack(app, slug=f"hack{index}", title=f"hack{index}")
     await send(app, "/hack", ALICE)
     last = [m for m in app["session"].requests if isinstance(m, SendMessage)][-1]
-    assert last.reply_markup is None
-    assert all(f"hack{index}" in last.text for index in range(3))
+    assert last.ephemeral_message_parameters.receiver_user_id == USER_ID
+    labels = [item.text for row in last.reply_markup.inline_keyboard for item in row]
+    assert all(any(f"hack{index}" in label for label in labels) for index in range(3))
 
 
 async def test_expired_popup(app):
@@ -398,3 +478,221 @@ async def test_setup_mode_uses_help_and_me(storage):
         assert not any(isinstance(m, LeaveChat) for m in session.requests)
     finally:
         await github.close()
+
+
+async def test_non_admin_manual_creation_edit_and_ephemeral_input(app):
+    await send(app, "/hack", ALICE, ephemeral=True)
+    await click(app, "Создать вручную")
+    for value in (
+        "Хакатон без админов",
+        "01.12.2026 23:59",
+        "05.12.2026 10:00",
+        "07.12.2026 18:00",
+        "2",
+        "3",
+    ):
+        await answer_form(app, value)
+    for label, value in (
+        ("Сайт", "https://hack.example/event"),
+        ("Репозиторий GitHub", "team/project"),
+        ("Чат организаторов", "https://t.me/organizers"),
+    ):
+        await click(app, label)
+        await answer_form(app, value)
+    await click(app, "ТЗ: ссылка или файл")
+    await answer_form(
+        app, "", document=Document(file_id="SPEC", file_unique_id="s", file_name="spec.pdf")
+    )
+    await click(app, "Чекпоинты")
+    await click(app, "Добавить чекпоинт")
+    await answer_form(app, "Промежуточная защита | 06.12.2026 12:00")
+    assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
+    personal = [method for method in app["session"].requests if isinstance(method, SendMessage)]
+    assert personal and all(
+        method.ephemeral_message_parameters.receiver_user_id == USER_ID for method in personal
+    )
+    prompts = [method for method in personal if isinstance(method.reply_markup, ForceReply)]
+    assert len(prompts) >= 10
+    assert all(not method.reply_markup.selective for method in prompts)
+    assert all(
+        not method.reply_parameters.allow_sending_without_reply
+        for method in personal
+        if method.reply_parameters
+    )
+    await click(app, "Опубликовать")
+    hack = (await app["storage"].hackathons.list(ALLOWED_CHAT))[0]
+    assert (
+        hack.created_by == USER_ID
+        and hack.repo == REPO
+        and hack.team_min == 2
+        and hack.team_max == 3
+    )
+    assert hack.spec_file_id == "SPEC" and hack.org_chat_url == "https://t.me/organizers"
+    checkpoints = await app["storage"].workflow.checkpoints(hack.id)
+    assert len(checkpoints) == 1
+    shared = [
+        method
+        for method in app["session"].requests
+        if isinstance(method, SendMessage) and not method.ephemeral_message_parameters
+    ]
+    assert (
+        len(shared) == 1
+        and shared[0].reply_markup.inline_keyboard[0][0].callback_data == f"hv:{hack.id}:yes"
+    )
+    bob = tg_user(3003, "bob_user", "Bob")
+    await send(app, f"/hack {hack.slug}", bob)
+    await click(app, "Редактировать", bob)
+    await click(app, "Название", bob)
+    await answer_form(app, "Изменено участником", bob)
+    await click(app, "Сохранить изменения", bob)
+    updated = await app["storage"].hackathons.get_by_id(hack.id)
+    assert updated.title == "Изменено участником" and updated.revision == 1
+    assert (await app["storage"].workflow.checkpoints(hack.id))[0].id == checkpoints[0].id
+    assert any(
+        isinstance(method, EditEphemeralMessageText) and method.receiver_user_id == bob.id
+        for method in app["session"].requests
+    )
+
+
+async def test_auto_url_requires_author_confirmation_and_deduplicates(app, monkeypatch):
+    import json
+
+    async def fetch(url):
+        event = {
+            "@type": "Event",
+            "name": "Хакатон из ссылки",
+            "startDate": "2026-12-05T10:00:00+03:00",
+            "endDate": "2026-12-07T18:00:00+03:00",
+            "offers": {"validThrough": "2026-12-01T23:59:00+03:00"},
+            "minTeamSize": 2,
+            "maxTeamSize": 4,
+        }
+        return '<script type="application/ld+json">' + json.dumps(event) + "</script>", url
+
+    monkeypatch.setattr("bot.services.hackathons.fetch_public_page", fetch)
+    await send(app, "https://hack.example/event", ALICE)
+    assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
+    panel = private_panel(app)
+    assert panel.receiver_user.id == USER_ID
+    publish = next(
+        item.callback_data
+        for row in panel.reply_markup.inline_keyboard
+        for item in row
+        if "Опубликовать" in item.text
+    )
+    before = len(app["session"].requests)
+    assert await press(app, publish, ADMIN, source=panel) == []
+    assert len(app["session"].requests) == before
+    await click(app, "Опубликовать")
+    hacks = await app["storage"].hackathons.list(ALLOWED_CHAT)
+    assert len(hacks) == 1 and hacks[0].title == "Хакатон из ссылки" and hacks[0].team_max == 4
+    await send(app, "https://hack.example/event", ALICE)
+    await click(app, "Опубликовать")
+    assert len(await app["storage"].hackathons.list(ALLOWED_CHAT)) == 1
+    shared = [
+        method
+        for method in app["session"].requests
+        if isinstance(method, SendMessage) and not method.ephemeral_message_parameters
+    ]
+    assert len(shared) == 1
+
+
+async def test_votes_team_choices_and_duplicate_new_team_click(app):
+    import asyncio
+
+    from tests.test_hack_workflow import draft
+
+    session, fields = await draft(app["storage"])
+    hack_id = await app["storage"].workflow.publish_draft(session, fields)
+    await app["ctx"].hack_notifications.flush()
+    actors = [tg_user(uid, f"member_{uid}") for uid in (2002, 3003, 4004, 5005, 6006, 7007)]
+    for actor in actors[:2]:
+        await send(app, "/hack", actor)
+        await press(app, f"hv:{hack_id}:yes", actor)
+    teams = await app["storage"].workflow.teams(hack_id)
+    assert teams[0].members == [2002, 3003]
+    await send(app, "/hack", actors[2])
+    await press(app, f"hv:{hack_id}:yes", actors[2])
+    await click(app, "Вступить", actors[2])
+    await send(app, "/hack", actors[3])
+    await press(app, f"hv:{hack_id}:yes", actors[3])
+    await click(app, "Сверх лимита", actors[3])
+    await click(app, "Присоединиться сверх лимита", actors[3])
+    assert (await app["storage"].workflow.teams(hack_id))[0].members == [2002, 3003, 4004, 5005]
+    await send(app, "/hack", actors[4])
+    await press(app, f"hv:{hack_id}:yes", actors[4])
+    panel = private_panel(app, actors[4])
+    new_team = next(
+        item.callback_data
+        for row in panel.reply_markup.inline_keyboard
+        for item in row
+        if "Новая команда" in item.text
+    )
+    await asyncio.gather(*(press(app, new_team, actors[4], source=panel) for _ in range(2)))
+    await send(app, "/hack", actors[5])
+    await press(app, f"hv:{hack_id}:yes", actors[5])
+    teams = await app["storage"].workflow.teams(hack_id)
+    assert len(teams) == 2 and teams[1].members == [6006, 7007]
+    assert app["ctx"].settings.bot_admin_ids.isdisjoint(actor.id for actor in actors)
+    assert any(
+        isinstance(method, SendMessage)
+        and method.ephemeral_message_parameters
+        and method.ephemeral_message_parameters.replace_callback_query_message
+        for method in app["session"].requests
+    )
+
+
+async def test_incomplete_or_stolen_draft_cannot_be_published(app):
+    await send(app, "Хакатон без дат", ALICE)
+    session = (await app["storage"].workflow.drafts(USER_ID, ALLOWED_CHAT))[0]
+    panel = private_panel(app)
+    forged = f"hk:{session.token}:{session.revision}:publish:"
+    await press(app, forged, ALICE, source=panel)
+    assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
+    forged_panel = panel.model_copy(update={"receiver_user": None})
+    await press(app, forged, ADMIN, source=forged_panel)
+    assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
+    assert not any(
+        isinstance(method, SendMessage) and not method.ephemeral_message_parameters
+        for method in app["session"].requests
+    )
+
+
+async def test_expired_ephemeral_ui_keeps_draft_recoverable(app):
+    await send(app, "/hack", ALICE)
+    await click(app, "Создать вручную")
+    await answer_form(app, "Сохранённый черновик")
+    drafts = await app["storage"].workflow.drafts(USER_ID, ALLOWED_CHAT)
+    assert drafts[0].data["title"] == "Сохранённый черновик"
+    app["session"].messages.clear()
+    app["session"].addresses.clear()
+    await send(app, "/hack", ALICE)
+    await click(app, "Мои черновики")
+    await click(app, "Сохранённый черновик")
+    assert "Сохранённый черновик" in await shown(app, ALICE)
+
+
+async def test_public_text_is_not_used_as_private_form_input(app):
+    await send(app, "/hack", ALICE)
+    await click(app, "Создать вручную")
+    await send(app, "Это обычное сообщение в группе", ALICE)
+    session = await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)
+    assert session.step == "input:title" and "title" not in session.data
+    await answer_form(app, "Личное название")
+    session = await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)
+    assert session.data["title"] == "Личное название"
+
+
+async def test_personal_delivery_failure_never_falls_back_to_public_message(app, monkeypatch):
+    original = app["session"].make_request
+
+    async def fail_personal(bot, method, timeout=None):
+        if isinstance(method, SendMessage) and method.ephemeral_message_parameters:
+            app["session"].requests.append(method)
+            raise TelegramBadRequest(method=method, message="Ephemeral delivery unavailable")
+        return await original(bot, method, timeout)
+
+    monkeypatch.setattr(app["session"], "make_request", fail_personal)
+    await send(app, "/help", ALICE)
+    sends = [method for method in app["session"].requests if isinstance(method, SendMessage)]
+    assert sends and all(method.ephemeral_message_parameters for method in sends)

@@ -38,7 +38,7 @@ def reminder_header(
     at = at or hack.milestone_at(milestone)
     until = MILESTONE_UNTIL[milestone] if title is None else f"до «{escape(title)}»"
     return (
-        f"⏰ <b>{escape(hack.slug)}</b>: {until} осталось "
+        f"⏰ <b>{escape(hack.display_name)}</b>: {until} осталось "
         f"{format_duration(at - now)} ({format_dt(at, tz)} {tz_label(tz)})"
     )
 
