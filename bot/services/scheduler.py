@@ -10,6 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.config import Settings
 from bot.services.archive import ArchiveService
+from bot.services.hack_notifications import HackNotifications
 from bot.services.reminders import ReminderService
 from bot.services.tasks import TaskService
 
@@ -33,12 +34,14 @@ def create_scheduler(
     archive: ArchiveService,
     reminders: ReminderService,
     tasks: TaskService,
+    hack_notifications: HackNotifications,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
 
     async def tick() -> None:
-        await archive.archive_due()
         await reminders.tick()
+        await archive.archive_due()
+        await hack_notifications.flush()
 
     scheduler.add_job(
         _guard("tick", tick),

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import aiosqlite
 
 from bot.db.database import Database, from_db, to_db, utcnow
+from bot.db.hack_workflow import HackWorkflowRepo
 from bot.db.models import (
     HACK_ACTIVE,
     HACK_FINISHED,
@@ -50,6 +51,11 @@ def _hackathon(row: aiosqlite.Row) -> Hackathon:
         place=row["place"],
         created_at=from_db(row["created_at"]),
         finished_at=from_db(row["finished_at"]),
+        created_by=row["created_by"],
+        team_min=row["team_min"],
+        team_max=row["team_max"],
+        source_key=row["source_key"],
+        revision=row["revision"],
     )
 
 
@@ -188,6 +194,10 @@ class ChatsRepo:
                     (new_chat_id, old_chat_id),
                 ),
                 (
+                    "UPDATE hack_sessions SET chat_id = ? WHERE chat_id = ?",
+                    (new_chat_id, old_chat_id),
+                ),
+                (
                     """
                     INSERT INTO chat_migrations (old_chat_id, new_chat_id, migrated_at)
                     VALUES (?, ?, ?)
@@ -302,31 +312,40 @@ class HackathonsRepo:
     async def delete(self, hack_id: int) -> None:
         await self.db.execute("DELETE FROM hackathons WHERE id = ?", (hack_id,))
 
-    async def archive(self, hack_id: int, finished_at: datetime) -> None:
+    async def archive(
+        self, hack_id: int, finished_at: datetime, notification: str | None = None
+    ) -> None:
         """Move a hackathon to the archive.
 
         Open (not closed) tasks are dropped, closed ones stay for statistics.
         Only history-relevant data is kept: materials are cleared.
         """
-        await self.db.run_in_transaction(
-            [
-                (
-                    """
+        statements = [
+            (
+                """
                     UPDATE hackathons SET status = ?, finished_at = ?,
                         site_url = NULL, org_chat_url = NULL, spec_url = NULL,
                         spec_file_id = NULL, spec_file_name = NULL
                     WHERE id = ?
                     """,
-                    (HACK_FINISHED, to_db(finished_at), hack_id),
-                ),
+                (HACK_FINISHED, to_db(finished_at), hack_id),
+            ),
+            (
+                "DELETE FROM tasks WHERE hackathon_id = ? AND status != ?",
+                (hack_id, TASK_CLOSED),
+            ),
+            ("UPDATE tasks SET active = 0 WHERE hackathon_id = ?", (hack_id,)),
+            ("DELETE FROM deferred_pings WHERE hackathon_id = ?", (hack_id,)),
+            ("UPDATE hack_publications SET dirty=dirty+1 WHERE hackathon_id=?", (hack_id,)),
+        ]
+        if notification:
+            statements.append(
                 (
-                    "DELETE FROM tasks WHERE hackathon_id = ? AND status != ?",
-                    (hack_id, TASK_CLOSED),
-                ),
-                ("UPDATE tasks SET active = 0 WHERE hackathon_id = ?", (hack_id,)),
-                ("DELETE FROM deferred_pings WHERE hackathon_id = ?", (hack_id,)),
-            ]
-        )
+                    "INSERT OR IGNORE INTO hack_notices(event_key,hackathon_id,text) VALUES(?,?,?)",
+                    (f"archive:{hack_id}", hack_id, notification),
+                )
+            )
+        await self.db.run_in_transaction(statements)
 
     # --- members ---
 
@@ -680,3 +699,4 @@ class Storage:
         self.availability = AvailabilityRepo(db)
         self.reminders = RemindersRepo(db)
         self.popups = PopupsRepo(db)
+        self.workflow = HackWorkflowRepo(db)

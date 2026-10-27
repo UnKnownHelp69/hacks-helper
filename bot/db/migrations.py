@@ -124,6 +124,69 @@ MIGRATIONS: list[str] = [
         created_at  TEXT NOT NULL
     );
     """,
+    # 3: self-service hackathons, persistent private conversations and team formation.
+    """
+    ALTER TABLE hackathons ADD COLUMN created_by INTEGER;
+    ALTER TABLE hackathons ADD COLUMN team_min INTEGER NOT NULL DEFAULT 1 CHECK(team_min >= 1);
+    ALTER TABLE hackathons ADD COLUMN team_max INTEGER NOT NULL DEFAULT 4
+        CHECK(team_max >= team_min);
+    ALTER TABLE hackathons ADD COLUMN source_key TEXT;
+    ALTER TABLE hackathons ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX idx_hackathon_source ON hackathons(chat_id, source_key)
+        WHERE source_key IS NOT NULL;
+
+    CREATE TABLE hack_sessions (
+        user_id INTEGER NOT NULL,
+        chat_id INTEGER NOT NULL,
+        token TEXT PRIMARY KEY,
+        step TEXT NOT NULL,
+        data TEXT NOT NULL DEFAULT '{}',
+        expires_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX idx_hack_session_user ON hack_sessions(user_id, updated_at);
+    CREATE TABLE hack_checkpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hackathon_id INTEGER NOT NULL REFERENCES hackathons(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        at TEXT NOT NULL,
+        UNIQUE(hackathon_id, title, at)
+    );
+    CREATE TABLE hack_votes (
+        hackathon_id INTEGER NOT NULL REFERENCES hackathons(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL,
+        choice TEXT NOT NULL CHECK(choice IN ('yes', 'no', 'maybe')),
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(hackathon_id, user_id)
+    );
+    CREATE TABLE hack_teams (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hackathon_id INTEGER NOT NULL REFERENCES hackathons(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(id, hackathon_id)
+    );
+    CREATE TABLE hack_team_members (
+        hackathon_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        team_id INTEGER NOT NULL,
+        PRIMARY KEY(hackathon_id, user_id),
+        FOREIGN KEY(team_id, hackathon_id) REFERENCES hack_teams(id, hackathon_id) ON DELETE CASCADE
+    );
+    CREATE TABLE hack_publications (
+        hackathon_id INTEGER PRIMARY KEY REFERENCES hackathons(id) ON DELETE CASCADE,
+        message_id INTEGER,
+        dirty INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE TABLE hack_notices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_key TEXT NOT NULL UNIQUE,
+        hackathon_id INTEGER NOT NULL REFERENCES hackathons(id) ON DELETE CASCADE,
+        text TEXT NOT NULL,
+        delivered_at TEXT
+    );
+    """,
 ]
 
 LATEST_VERSION = len(MIGRATIONS)

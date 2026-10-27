@@ -27,6 +27,8 @@ from bot.middlewares.registry import UserRegistryMiddleware
 from bot.middlewares.security import SecurityMiddleware, status_value
 from bot.services.archive import ArchiveService
 from bot.services.github import GitHubClient
+from bot.services.hack_notifications import HackNotifications
+from bot.services.hackathons import HackathonService
 from bot.services.notify import Messenger, Pinger
 from bot.services.reminders import ReminderService
 from bot.services.scheduler import create_scheduler
@@ -65,7 +67,9 @@ def build_context(
     messenger = Messenger(bot)
     tasks = TaskService(settings, storage, github, pinger, messenger)
     reminders = ReminderService(settings, storage, pinger, messenger)
-    archive = ArchiveService(settings, storage, tasks, messenger)
+    archive = ArchiveService(settings, storage, tasks)
+    hacks = HackathonService(settings, storage, directory, github)
+    hack_notifications = HackNotifications(settings, storage, bot, directory, messenger)
     return AppContext(
         settings=settings,
         storage=storage,
@@ -76,6 +80,8 @@ def build_context(
         tasks=tasks,
         reminders=reminders,
         archive=archive,
+        hacks=hacks,
+        hack_notifications=hack_notifications,
     )
 
 
@@ -227,7 +233,9 @@ async def _run_bot(settings: Settings, storage: Storage) -> None:
         )
 
     dp = build_dispatcher(ctx, on_migrate)
-    scheduler = create_scheduler(settings, ctx.archive, ctx.reminders, ctx.tasks)
+    scheduler = create_scheduler(
+        settings, ctx.archive, ctx.reminders, ctx.tasks, ctx.hack_notifications
+    )
 
     try:
         await wait_for_telegram(bot)

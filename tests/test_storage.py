@@ -119,3 +119,36 @@ async def test_existing_v1_database_is_upgraded(tmp_path):
     assert await storage_.chats.get_timezone(ALLOWED_CHAT) == "Asia/Omsk"  # data kept
     assert await storage_.popups.add(ALLOWED_CHAT, "x") > 0
     await db.close()
+
+
+async def test_existing_v2_hackathon_and_members_survive_workflow_migration(tmp_path):
+    import aiosqlite
+
+    from bot.db.migrations import MIGRATIONS
+
+    path = tmp_path / "v2.db"
+    async with aiosqlite.connect(path) as conn:
+        await conn.executescript("\n".join(MIGRATIONS[:2]))
+        await conn.executescript(
+            "CREATE TABLE schema_version(version INTEGER NOT NULL);"
+            "INSERT INTO schema_version VALUES(2);"
+            "INSERT INTO hackathons"
+            "(chat_id,slug,title,registration_end,start_at,end_at,created_at) "
+            "VALUES(-1001,'old','Сохранённый хакатон','2026-11-01T00:00:00+00:00',"
+            "'2026-11-05T00:00:00+00:00','2026-11-07T00:00:00+00:00',"
+            "'2026-10-01T00:00:00+00:00');"
+            "INSERT INTO hackathon_members VALUES(1,123,'2026-10-01T00:00:00+00:00');"
+        )
+        await conn.commit()
+    db = Database(path)
+    await db.connect()
+    try:
+        storage = Storage(db, "Europe/Moscow")
+        hack = await storage.hackathons.get(-1001, "old")
+        assert hack.title == "Сохранённый хакатон"
+        assert hack.team_min == 1 and hack.team_max == 4 and hack.created_by is None
+        assert await storage.hackathons.members(hack.id) == [123]
+        assert await storage.workflow.checkpoints(hack.id) == []
+        assert await get_version(db.conn) == LATEST_VERSION
+    finally:
+        await db.close()

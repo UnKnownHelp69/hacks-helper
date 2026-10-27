@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,18 @@ class Database:
                     await self.conn.execute(sql, tuple(params))
                 await self.conn.commit()
             except Exception:
+                await self.conn.rollback()
+                raise
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Serialize a read/modify/write operation, including cancellation-safe rollback."""
+        async with self._write_lock:
+            try:
+                await self.conn.execute("BEGIN IMMEDIATE")
+                yield self.conn
+                await self.conn.commit()
+            except BaseException:
                 await self.conn.rollback()
                 raise
 

@@ -10,7 +10,6 @@ from bot.config import Settings
 from bot.db.database import utcnow
 from bot.db.repositories import Storage
 from bot.services.github import GitHubError
-from bot.services.notify import Messenger
 from bot.services.schedule_logic import should_archive
 from bot.services.tasks import TaskService
 
@@ -18,13 +17,10 @@ log = logging.getLogger(__name__)
 
 
 class ArchiveService:
-    def __init__(
-        self, settings: Settings, storage: Storage, tasks: TaskService, messenger: Messenger
-    ) -> None:
+    def __init__(self, settings: Settings, storage: Storage, tasks: TaskService) -> None:
         self.settings = settings
         self.storage = storage
         self.tasks = tasks
-        self.messenger = messenger
 
     async def archive_due(self, now: datetime | None = None) -> list[int]:
         """Archive every active hackathon whose end date has passed. Returns archived ids."""
@@ -43,16 +39,14 @@ class ArchiveService:
                     log.warning("Final sync for %s failed: %s", hack.slug, exc.message)
                 except Exception:
                     log.exception("Final sync for %s crashed", hack.slug)
-            await self.storage.hackathons.archive(hack.id, now)
-            archived.append(hack.id)
-            log.info("Hackathon %s (%s) archived", hack.slug, hack.id)
-            if not allowed:
-                continue
             total, _ = await self.storage.tasks.closed_counts(hack.id)
             text = [
                 f"🏁 <b>{escape(hack.display_name)}</b> завершён, закрыто issues: {total}",
             ]
             if sync_lines:
                 text = [*sync_lines, "", *text]
-            await self.messenger.send(hack.chat_id, "\n".join(text))
+            notification = "\n".join(text) if allowed else None
+            await self.storage.hackathons.archive(hack.id, now, notification)
+            archived.append(hack.id)
+            log.info("Hackathon %s (%s) archived", hack.slug, hack.id)
         return archived

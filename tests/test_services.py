@@ -79,7 +79,7 @@ async def env(storage, fake_bot):
     messenger = Messenger(fake_bot)
     tasks = TaskService(settings, storage, github, pinger, messenger)  # type: ignore[arg-type]
     reminders = ReminderService(settings, storage, pinger, messenger)
-    archive = ArchiveService(settings, storage, tasks, messenger)
+    archive = ArchiveService(settings, storage, tasks)
     for uid, name in ((ALICE, "alice_tg"), (BOB, "bob_tg")):
         fake_bot.set_member(ALLOWED_CHAT, user(uid, name))
     hack = await storage.hackathons.create(
@@ -303,9 +303,55 @@ async def test_archive_after_end(env):
     assert hack.status == HACK_FINISHED
     assert await storage.tasks.active_for_hackathon(hack.id) == []
     assert await storage.tasks.closed_counts(hack.id) == (1, {ALICE: 1})
-    assert "завершён, закрыто issues: 1" in env["bot"].sent[-1][1]
+    notices = await storage.workflow.pending_notices()
+    assert "завершён, закрыто issues: 1" in notices[0]["text"]
     assert await storage.hackathons.members(hack.id) == [ALICE, BOB]
     # not archived twice
     assert await env["archive"].archive_due(env["hack"].end_at + timedelta(hours=1)) == []
     task = await storage.tasks.get(hack.id, ALICE, 1)
     assert task.status == TASK_CLOSED
+
+
+async def test_archive_announcement_is_queued_atomically(env):
+    await env["archive"].archive_due(env["hack"].end_at)
+    notices = await env["storage"].workflow.pending_notices()
+    assert len(notices) == 1 and notices[0]["event_key"] == f"archive:{env['hack'].id}"
+
+
+async def test_checkpoint_reminders_and_actual_event_are_sent_once(env):
+    from bot.db.database import to_db
+
+    storage, reminders = env["storage"], env["reminders"]
+    at = NOW + timedelta(hours=5)
+    await storage.db.execute(
+        "INSERT INTO hack_checkpoints(hackathon_id,title,at) VALUES(?,?,?)",
+        (env["hack"].id, "Промежуточная защита", to_db(at)),
+    )
+    await reminders.send_due_reminders(NOW)
+    await reminders.send_due_reminders(NOW)
+    assert len([text for _, text in env["bot"].sent if "Промежуточная защита" in text]) == 1
+    await reminders.tick(at)
+    count = len(env["bot"].sent)
+    assert len([text for _, text in env["bot"].sent if "Промежуточная защита" in text]) == 2
+    await reminders.tick(at)
+    assert len(env["bot"].sent) == count
+
+
+async def test_failed_reminder_is_not_marked_sent(env, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    await _start_in(env, timedelta(hours=2))
+    send = AsyncMock(return_value=False)
+    monkeypatch.setattr(env["reminders"].messenger, "send", send)
+    await env["reminders"].send_due_reminders(NOW)
+    hack = await env["storage"].hackathons.get_by_id(env["hack"].id)
+    assert (
+        await env["storage"].reminders.sent_offsets(hack.id, MILESTONE_START, hack.start_at)
+        == set()
+    )
+    send.return_value = True
+    await env["reminders"].send_due_reminders(NOW)
+    assert await env["storage"].reminders.sent_offsets(hack.id, MILESTONE_START, hack.start_at) == {
+        1440,
+        180,
+    }

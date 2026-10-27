@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 HACK_ACTIVE = "active"
 HACK_FINISHED = "finished"
@@ -54,6 +55,11 @@ class Hackathon:
     place: int | None
     created_at: datetime
     finished_at: datetime | None
+    created_by: int | None = None
+    team_min: int = 1
+    team_max: int = 4
+    source_key: str | None = None
+    revision: int = 0
 
     @property
     def is_active(self) -> bool:
@@ -95,3 +101,30 @@ class DeferredPing:
     milestone_at: datetime
     user_id: int
     due_at: datetime
+
+
+@dataclass
+class Checkpoint:
+    id: int
+    hackathon_id: int
+    title: str
+    at: datetime
+
+
+@dataclass
+class Team:
+    id: int
+    hackathon_id: int
+    name: str
+    members: list[int]
+
+
+@dataclass
+class HackSession:
+    user_id: int
+    chat_id: int
+    token: str
+    step: str
+    data: dict[str, Any]
+    expires_at: datetime
+    revision: int = 0

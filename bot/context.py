@@ -14,6 +14,8 @@ from bot.db.repositories import Storage
 from bot.errors import UserError
 from bot.services.archive import ArchiveService
 from bot.services.github import GitHubClient
+from bot.services.hack_notifications import HackNotifications
+from bot.services.hackathons import HackathonService
 from bot.services.notify import Messenger, Pinger
 from bot.services.reminders import ReminderService, chat_zone
 from bot.services.tasks import TaskService
@@ -39,6 +41,8 @@ class AppContext:
     tasks: TaskService
     reminders: ReminderService
     archive: ArchiveService
+    hacks: HackathonService
+    hack_notifications: HackNotifications
     issue_queries: OrderedDict[str, IssueQuery] = field(default_factory=OrderedDict)
 
     async def zone(self, chat_id: int) -> ZoneInfo:
