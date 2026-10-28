@@ -150,7 +150,7 @@ If a date has no time, use 00:00 for start/checkpoints and 23:59 for deadlines/e
 Use a year only when explicitly stated or unambiguously established elsewhere in the source.
 registration_end is the participant registration deadline, not the solution submission deadline.
 Do not mistake deadlines for customers submitting tasks or challenge proposals for participant
-registration. current is an unverified draft, NEVER source evidence. When review_issues is
+registration. current is an unverified candidate, NEVER source evidence. When review_issues is
 nonempty, re-read post/page/previous_pages to audit the dates. registration_end must be no later
 than start_at, and start_at before end_at. Check event stages, years, date-only times and timezones.
 Only correct a date when the supplied sources support the correction. If a date cannot be
@@ -459,7 +459,7 @@ class HackathonLLM:
             log.warning("Hackathon LLM timed out (provider=%s, model=%s)", provider, model)
             raise UserError(
                 "LLM не ответила за две минуты. Сохранены уже найденные данные; "
-                "попробуйте импорт ещё раз или дополните черновик вручную"
+                "попробуйте импорт ещё раз"
             ) from None
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
@@ -486,5 +486,5 @@ class HackathonLLM:
             # Provider bodies/prompts/headers may contain secrets: never log or show them.
             raise UserError(
                 "LLM не смогла заполнить данные. Сохранён результат обычного парсера; "
-                "проверьте настройки API или дополните черновик вручную"
+                "проверьте настройки API и попробуйте импорт ещё раз"
             ) from None

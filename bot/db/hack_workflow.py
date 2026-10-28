@@ -1,4 +1,4 @@
-"""Persistent drafts and atomic self-service voting/team transitions."""
+"""Persistent personal sessions and atomic self-service voting/team transitions."""
 
 from __future__ import annotations
 
@@ -97,14 +97,26 @@ class HackWorkflowRepo:
             return None
         return self._session(row)
 
-    async def drafts(self, user_id: int, chat_id: int) -> list[HackSession]:
-        rows = await self.db.fetchall(
-            "SELECT * FROM hack_sessions WHERE user_id=? AND chat_id=? AND expires_at>? "
-            "AND (step='preview' OR step LIKE 'input:%' OR step='checkpoints') "
-            "ORDER BY updated_at DESC,rowid DESC",
-            (user_id, chat_id, to_db(utcnow())),
+    async def delete_session(self, session: HackSession) -> None:
+        await self.db.execute(
+            "DELETE FROM hack_sessions WHERE token=? AND user_id=?",
+            (session.token, session.user_id),
         )
-        return [self._session(row) for row in rows]
+
+    async def clear_forms(self, user_id: int, chat_id: int) -> None:
+        await self.db.execute(
+            "DELETE FROM hack_sessions WHERE user_id=? AND chat_id=? "
+            "AND (step LIKE 'form:%' OR step IN ('editing','edit_checkpoints'))",
+            (user_id, chat_id),
+        )
+
+    async def clear_unfinished_forms(self) -> None:
+        """Remove retired drafts, retaining published hackathons and personal settings."""
+        await self.db.execute(
+            "DELETE FROM hack_sessions WHERE step IN "
+            "('preview','checkpoints','editing','edit_checkpoints','completing','saving') "
+            "OR step LIKE 'input:%' OR step LIKE 'form:%'"
+        )
 
     async def save_session(self, session: HackSession) -> None:
         changed = await self.db.execute(
@@ -310,23 +322,23 @@ class HackWorkflowRepo:
             await self._dirty(conn, hack_id)
             return team_id
 
-    async def publish_draft(self, session: HackSession, fields: dict[str, Any]) -> int:
+    async def save_hack(self, session: HackSession, fields: dict[str, Any]) -> int:
         """Publish or edit once; concurrent clicks cannot create duplicate hackathons."""
         if set(fields) - self.FIELDS:
             raise ValueError("Unknown hackathon fields")
         async with self.db.transaction() as conn:
-            draft = await _one(
+            record = await _one(
                 conn,
                 "SELECT * FROM hack_sessions WHERE token=? AND user_id=?",
                 (session.token, session.user_id),
             )
-            if draft is None or from_db(draft["expires_at"]) <= utcnow():
-                raise UserError("Черновик устарел. Откройте /hack")
-            stored = json.loads(draft["data"])
+            if record is None or from_db(record["expires_at"]) <= utcnow():
+                raise UserError("Диалог устарел. Откройте /hack")
+            stored = json.loads(record["data"])
             if stored.get("published_id"):
                 return int(stored["published_id"])
-            if draft["revision"] != session.revision:
-                raise UserError("Черновик изменился. Проверьте данные ещё раз")
+            if record["revision"] != session.revision:
+                raise UserError("Данные изменились. Откройте хакатон заново")
             hack_id = session.data.get("editing_id")
             if hack_id is not None:
                 hack = await self._active(conn, int(hack_id))

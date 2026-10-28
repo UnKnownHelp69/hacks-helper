@@ -26,18 +26,18 @@ async def draft(storage, *, source=None):
 
 async def test_publish_is_idempotent_and_source_is_deduplicated(storage):
     session, fields = await draft(storage, source="https://hack.example/")
-    ids = await asyncio.gather(*(storage.workflow.publish_draft(session, fields) for _ in range(3)))
+    ids = await asyncio.gather(*(storage.workflow.save_hack(session, fields) for _ in range(3)))
     assert len(set(ids)) == 1
     second, fields2 = await draft(storage, source="https://hack.example/")
     fields2["title"] = "Не перезаписывать существующую карточку"
-    assert await storage.workflow.publish_draft(second, fields2) == ids[0]
+    assert await storage.workflow.save_hack(second, fields2) == ids[0]
     assert (await storage.hackathons.get_by_id(ids[0])).title == fields["title"]
     assert len(await storage.hackathons.list(ALLOWED_CHAT)) == 1
 
 
 async def test_votes_form_team_once_without_admin_permissions(storage):
     session, fields = await draft(storage)
-    hack_id = await storage.workflow.publish_draft(session, fields)
+    hack_id = await storage.workflow.save_hack(session, fields)
     await asyncio.gather(*(storage.workflow.vote(hack_id, user_id, "yes") for user_id in (1, 2, 3)))
     teams = await storage.workflow.teams(hack_id)
     assert len(teams) == 1 and teams[0].members == [1, 2]
@@ -56,7 +56,7 @@ async def test_votes_form_team_once_without_admin_permissions(storage):
 
 async def test_new_team_recruits_and_switching_vote_removes_membership(storage):
     session, fields = await draft(storage)
-    hack_id = await storage.workflow.publish_draft(session, fields)
+    hack_id = await storage.workflow.save_hack(session, fields)
     for user_id in (1, 2, 3):
         await storage.workflow.vote(hack_id, user_id, "yes")
     team_id = await storage.workflow.join_team(hack_id, 3, None)
@@ -72,9 +72,9 @@ async def test_new_team_recruits_and_switching_vote_removes_membership(storage):
 
 async def test_cross_hackathon_team_and_expired_registration_are_rejected(storage):
     session, fields = await draft(storage)
-    first = await storage.workflow.publish_draft(session, fields)
+    first = await storage.workflow.save_hack(session, fields)
     session2, fields2 = await draft(storage)
-    second = await storage.workflow.publish_draft(session2, fields2)
+    second = await storage.workflow.save_hack(session2, fields2)
     team_id = await storage.workflow.vote(first, 1, "yes")
     await storage.workflow.vote(second, 1, "yes")
     with pytest.raises(UserError, match="недоступна"):
@@ -103,7 +103,7 @@ async def test_edit_keeps_checkpoint_ids_and_rejects_stale_card(storage):
     at = to_db(datetime.fromisoformat(fields["start_at"]) + timedelta(hours=1))
     session.data["checkpoints"] = [{"title": "Защита", "at": at}]
     await storage.workflow.save_session(session)
-    hack_id = await storage.workflow.publish_draft(session, fields)
+    hack_id = await storage.workflow.save_hack(session, fields)
     checkpoint = (await storage.workflow.checkpoints(hack_id))[0]
     edit = await storage.workflow.new_session(
         USER_ID,
@@ -117,15 +117,15 @@ async def test_edit_keeps_checkpoint_ids_and_rejects_stale_card(storage):
     )
     stale = await storage.workflow.new_session(USER_ID, ALLOWED_CHAT, "preview", dict(edit.data))
     fields["title"] = "Новое название"
-    await storage.workflow.publish_draft(edit, fields)
+    await storage.workflow.save_hack(edit, fields)
     assert (await storage.workflow.checkpoints(hack_id))[0].id == checkpoint.id
     with pytest.raises(UserError, match="Карточка изменилась"):
-        await storage.workflow.publish_draft(stale, fields)
+        await storage.workflow.save_hack(stale, fields)
 
 
 async def test_publication_update_does_not_lose_a_concurrent_vote(storage):
     session, fields = await draft(storage)
-    hack_id = await storage.workflow.publish_draft(session, fields)
+    hack_id = await storage.workflow.save_hack(session, fields)
     publication = (await storage.workflow.dirty_publications())[0]
     await storage.workflow.vote(hack_id, 1, "yes")
     await storage.workflow.publication_sent(hack_id, 101, publication["dirty"])
@@ -139,3 +139,25 @@ async def test_transaction_rolls_back_on_cancellation(storage):
             await conn.execute("INSERT INTO chats(chat_id,timezone) VALUES(99,'UTC')")
             raise asyncio.CancelledError
     assert await storage.db.fetchone("SELECT 1 FROM chats WHERE chat_id=99") is None
+
+
+async def test_removing_unfinished_forms_preserves_hackathons_votes_and_model_preferences(storage):
+    session, fields = await draft(storage)
+    hack_id = await storage.workflow.save_hack(session, fields)
+    await storage.workflow.vote(hack_id, USER_ID, "yes")
+    await storage.users.set_llm_preference(USER_ID, "gigachat", "GigaChat")
+    old = await storage.workflow.new_session(
+        USER_ID, ALLOWED_CHAT, "preview", {"title": "Незавершённый"}
+    )
+    form = await storage.workflow.new_session(
+        USER_ID, ALLOWED_CHAT, "form:title", {"_mode": "create"}
+    )
+    profile = await storage.workflow.new_session(USER_ID, ALLOWED_CHAT, "profile")
+    await storage.workflow.clear_unfinished_forms()
+    await storage.workflow.clear_unfinished_forms()
+    assert await storage.workflow.session(USER_ID, old.token) is None
+    assert await storage.workflow.session(USER_ID, form.token) is None
+    assert await storage.workflow.session(USER_ID, profile.token) is not None
+    assert await storage.hackathons.get_by_id(hack_id) is not None
+    assert (await storage.workflow.votes(hack_id))["yes"] == [USER_ID]
+    assert await storage.users.llm_preference(USER_ID) == ("gigachat", "GigaChat")

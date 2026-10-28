@@ -4,15 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from html import escape, unescape
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from aiogram.types import (
+    Chat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    Message,
+    User,
+)
 
 from bot.config import Settings
 from bot.db.models import Hackathon
 from bot.db.repositories import Storage
+from bot.respond import personal_reply
 from bot.services.formatting import link
 from bot.services.notify import Messenger
 from bot.services.reminders import chat_zone
@@ -106,6 +115,20 @@ class HackNotifications:
                     continue
                 try:
                     text, keyboard = await self.card(hack)
+                    if hack.chat_id > 0:
+                        origin = Message(
+                            message_id=0,
+                            date=datetime.now(UTC),
+                            chat=Chat(id=hack.chat_id, type="private"),
+                            from_user=User(id=hack.chat_id, is_bot=False, first_name="User"),
+                        ).as_(self.api)
+                        sent = await personal_reply(origin, text, reply_markup=keyboard)
+                        if not isinstance(sent, Message):
+                            raise RuntimeError("Private hackathon panel was not delivered")
+                        await self.storage.workflow.publication_sent(
+                            hack.id, sent.message_id, publication["dirty"]
+                        )
+                        continue
                     message_id = publication["message_id"]
                     if message_id:
                         try:

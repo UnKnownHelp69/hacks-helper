@@ -16,6 +16,7 @@ router = Router(name="github")
 @router.message(Command("github"))
 async def cmd_github(message: Message, ctx: AppContext) -> None:
     assert message.from_user is not None
+    await ctx.storage.workflow.clear_forms(message.from_user.id, message.chat.id)
     login = await ctx.storage.github_links.get_login(message.from_user.id)
     account = link(f"https://github.com/{login}", login) if login else "не привязан"
     status = "настроена" if ctx.github.configured else "не настроена"

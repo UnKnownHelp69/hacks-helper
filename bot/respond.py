@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html import unescape
 from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
 
+from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     CallbackQuery,
@@ -27,6 +31,50 @@ if TYPE_CHECKING:
 POPUP_LIMIT = 200
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 _TAG_RE = re.compile(r"<[^>]+>")
+
+
+@dataclass
+class PersonalPanel:
+    message_id: int | None = None
+    ephemeral_id: int | None = None
+    revision: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+# Keep only identifiers, not Message/Bot references. Each bot and each recipient is isolated.
+_PANELS: WeakKeyDictionary[BaseSession, dict[tuple[int, int, int], PersonalPanel]] = (
+    WeakKeyDictionary()
+)
+
+
+def _panel(event: Message | CallbackQuery) -> PersonalPanel:
+    message = event.message if isinstance(event, CallbackQuery) else event
+    # Bot equality compares tokens, so use the actual API session identity as the weak key.
+    panels = _PANELS.setdefault(event.bot.session, {})
+    return panels.setdefault((event.bot.id, message.chat.id, event.from_user.id), PersonalPanel())
+
+
+def _panel_message(event: Message | CallbackQuery, panel: PersonalPanel) -> Message | None:
+    if panel.message_id is None:
+        return None
+    message = event.message if isinstance(event, CallbackQuery) else event
+    return Message(
+        message_id=panel.message_id,
+        ephemeral_message_id=panel.ephemeral_id,
+        receiver_user=event.from_user if panel.ephemeral_id is not None else None,
+        date=datetime.now(UTC),
+        chat=message.chat,
+    )
+
+
+def _remember_panel(event: Message | CallbackQuery, sent: Message) -> None:
+    panel = _panel(event)
+    panel.message_id, panel.ephemeral_id = sent.message_id, sent.ephemeral_message_id
+
+
+def personal_panel_revision(event: Message | CallbackQuery) -> int:
+    """Background progress yields the panel when a newer interaction replaces its contents."""
+    return _panel(event).revision
 
 
 def html_to_plain(text: str) -> str:
@@ -80,52 +128,44 @@ async def personal_reply(
 ) -> Message | bool:
     """Never retry a failed private delivery as a public group message."""
     options = personal_options(event, overlay=edit and not isinstance(reply_markup, ForceReply))
-    message = event.message if isinstance(event, CallbackQuery) else event
     chunks = split_message(text)
-    if (
-        isinstance(event, CallbackQuery)
-        and edit
-        and len(chunks) == 1
-        and not isinstance(reply_markup, ForceReply)
-    ):
-        try:
-            if message.ephemeral_message_id is not None:
-                return await event.bot.edit_ephemeral_message_text(
-                    chat_id=message.chat.id,
-                    receiver_user_id=event.from_user.id,
-                    ephemeral_message_id=message.ephemeral_message_id,
-                    text=text,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup,
-                    link_preview_options=NO_PREVIEW,
-                )
-            if message.chat.type == "private":
-                return await event.bot.edit_message_text(
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    text=text,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup,
-                    link_preview_options=NO_PREVIEW,
-                )
-        except TelegramBadRequest as exc:
-            if "not modified" in exc.message.lower():
-                return True
-            if (
-                "not found" not in exc.message.lower()
-                and "can't be edited" not in exc.message.lower()
-            ):
-                raise
-    result: Message | bool = False
-    for index, chunk in enumerate(chunks):
-        result = await event.bot.send_message(
-            **options,
-            text=chunk,
-            parse_mode="HTML",
-            link_preview_options=NO_PREVIEW,
-            reply_markup=reply_markup if index == len(chunks) - 1 else None,
-        )
-    return result
+    panel = _panel(event)
+    async with panel.lock:
+        panel.revision += 1
+        if edit and len(chunks) == 1 and not isinstance(reply_markup, ForceReply):
+            target = _panel_message(event, panel)
+            if target is None and isinstance(event, CallbackQuery):
+                message = event.message
+                if message.ephemeral_message_id is not None or message.chat.type == "private":
+                    target = message
+            if target is not None:
+                try:
+                    await edit_personal_reply(event, target, text, reply_markup=reply_markup)
+                    _remember_panel(event, target)
+                    return target.model_copy(update={"text": text, "reply_markup": reply_markup})
+                except TelegramBadRequest as exc:
+                    if not any(
+                        marker in exc.message.lower()
+                        for marker in (
+                            "not found",
+                            "can't be edited",
+                            "expired",
+                            "message_id_invalid",
+                        )
+                    ):
+                        raise
+        result: Message | bool = False
+        for index, chunk in enumerate(chunks):
+            result = await event.bot.send_message(
+                **options,
+                text=chunk,
+                parse_mode="HTML",
+                link_preview_options=NO_PREVIEW,
+                reply_markup=reply_markup if index == len(chunks) - 1 else None,
+            )
+        if isinstance(result, Message):
+            _remember_panel(event, result)
+        return result
 
 
 async def reply(message: Message, text: str) -> None:
@@ -133,7 +173,7 @@ async def reply(message: Message, text: str) -> None:
 
 
 async def edit_personal_reply(
-    event: Message,
+    event: Message | CallbackQuery,
     sent: Message,
     text: str,
     *,
@@ -141,9 +181,10 @@ async def edit_personal_reply(
 ) -> Message | bool:
     """Edit a bot-owned progress panel, retaining the original personal recipient."""
     options = personal_options(event)
-    if sent.chat.id != event.chat.id:
+    message = event.message if isinstance(event, CallbackQuery) else event
+    if sent.chat.id != message.chat.id:
         raise UserError("Личное сообщение относится к другому чату")
-    if event.chat.type in {"group", "supergroup"}:
+    if message.chat.type in {"group", "supergroup"}:
         if (
             sent.ephemeral_message_id is None
             or sent.receiver_user is None
@@ -151,7 +192,7 @@ async def edit_personal_reply(
         ):
             raise UserError("Это личное сообщение другого пользователя")
         method = event.bot.edit_ephemeral_message_text(
-            chat_id=event.chat.id,
+            chat_id=message.chat.id,
             receiver_user_id=event.from_user.id,
             ephemeral_message_id=sent.ephemeral_message_id,
             text=text,

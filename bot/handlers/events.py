@@ -83,7 +83,7 @@ async def on_unexpected_error(event: ErrorEvent) -> None:
     try:
         await personal_reply(
             event.update.callback_query or message,
-            "⚠️ Внутренняя ошибка. Данные черновика сохранены; откройте /hack повторно",
+            "⚠️ Внутренняя ошибка. Повторите действие через /hack",
         )
     except Exception as exc:
         log.warning("Could not deliver an error message: %s", exc)

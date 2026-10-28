@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
 
-from bot.respond import edit_personal_reply, personal_reply
+from bot.respond import edit_personal_reply, personal_panel_revision, personal_reply
 from bot.services.hack_data import DATE_FIELDS, FIELD_LABELS
 from bot.services.timeutil import format_dt
 
@@ -33,6 +33,7 @@ class ImportProgress:
         self.lock = asyncio.Lock()
         self.failed = False
         self.last_render = self.started - 2
+        self.panel_revision: int | None = None
 
     async def __aenter__(self) -> ImportProgress:
         return self
@@ -50,13 +51,18 @@ class ImportProgress:
             self.task = asyncio.create_task(self.tick())
 
     async def tick(self) -> None:
-        while True:
+        while not self.failed:
             await asyncio.sleep(5)
             await self.render()
 
     async def render(self) -> None:
         async with self.lock:
             if self.failed:
+                return
+            if self.panel_revision is not None and self.panel_revision != personal_panel_revision(
+                self.message
+            ):
+                self.failed, self.panel = True, None
                 return
             now = monotonic()
             if self.panel is not None and now - self.last_render < 1:
@@ -83,15 +89,16 @@ class ImportProgress:
             lines.append(f"Чекпоинты: {len(self.data.get('checkpoints', []))}")
             text = "\n".join(lines)
             if self.panel is None:
-                sent = await personal_reply(self.message, text, edit=False)
+                sent = await personal_reply(self.message, text)
                 if isinstance(sent, Message):
                     self.panel = sent
+                    self.panel_revision = personal_panel_revision(self.message)
                 self.last_render = now
                 return
             try:
                 await edit_personal_reply(self.message, self.panel, text)
                 self.last_render = now
             except TelegramAPIError:
-                # Import can still finish and persist its draft if an ephemeral panel expires.
+                # Import can still complete if an ephemeral panel expires.
                 log.warning("Hackathon import progress panel is unavailable")
                 self.panel, self.failed = None, True

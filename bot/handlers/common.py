@@ -24,6 +24,8 @@ button = partial(session_button, "me")
 
 @router.message(Command("help"))
 async def cmd_help(message: Message, ctx: AppContext) -> None:
+    if message.from_user and ctx.settings.is_chat_allowed(message.chat.id):
+        await ctx.storage.workflow.clear_forms(message.from_user.id, message.chat.id)
     if ctx.settings.setup_mode:
         await reply(
             message,
@@ -41,6 +43,7 @@ async def cmd_me(message: Message, ctx: AppContext) -> None:
         # Before setup, reveal only the caller's own id, without reusable buttons.
         await reply(message, f"Ваш user_id: <code>{message.from_user.id}</code>")
         return
+    await ctx.storage.workflow.clear_forms(message.from_user.id, message.chat.id)
     await profile(message, ctx)
 
 

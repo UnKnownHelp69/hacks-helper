@@ -203,6 +203,7 @@ async def run(settings: Settings) -> None:
 
 
 async def _run_bot(settings: Settings, storage: Storage) -> None:
+    await storage.workflow.clear_unfinished_forms()
     await apply_known_migrations(settings, storage)
     bot = Bot(
         settings.bot_token,

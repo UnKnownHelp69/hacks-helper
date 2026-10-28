@@ -7,11 +7,9 @@ from functools import partial
 from html import escape
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
-    ForceReply,
     Message,
 )
 
@@ -24,16 +22,18 @@ from bot.handlers.import_progress import ImportProgress
 from bot.handlers.interactive import callback_session, keyboard, session_button
 from bot.handlers.render import hackathon_card
 from bot.middlewares.security import command_name
-from bot.respond import edit_personal_reply, personal_options, personal_reply
+from bot.respond import personal_options, personal_reply
 from bot.services.args import parse_command
 from bot.services.hack_data import (
     DATE_FIELDS,
     FIELD_LABELS,
     REQUIRED_FIELDS,
+    import_date_issues,
     input_field,
     parse_checkpoint,
     validate_hack,
 )
+from bot.services.hack_import import HACK_RE, URL_RE
 from bot.services.timeutil import format_dt
 
 router = Router(name="hackathons")
@@ -46,6 +46,7 @@ button = partial(session_button, "hk")
 async def menu(event: Event, ctx: AppContext, session: HackSession | None = None) -> None:
     message = event.message if isinstance(event, CallbackQuery) else event
     if session is None:
+        await ctx.storage.workflow.clear_forms(event.from_user.id, message.chat.id)
         await ctx.hacks.require_access(message.chat.id, event.from_user.id)
         session = await ctx.storage.workflow.new_session(event.from_user.id, message.chat.id)
     archived = session.data.get("archive", False)
@@ -73,9 +74,6 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
             [button(session, "Активные" if archived else "Архив", "archive")],
         ]
     )
-    drafts = await ctx.storage.workflow.drafts(session.user_id, session.chat_id)
-    if drafts:
-        rows.append([button(session, f"📝 Мои черновики ({len(drafts)})", "drafts", 0)])
     title = "Архив хакатонов" if archived else "Хакатоны"
     text = f"🏆 <b>{title}</b>\n" + (
         "Выберите хакатон или создайте новый."
@@ -87,106 +85,85 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
     await personal_reply(event, text, reply_markup=keyboard(rows))
 
 
-async def preview(
-    event: Event,
-    ctx: AppContext,
-    session: HackSession,
-    error: str | None = None,
-    *,
-    target: Message | None = None,
-) -> None:
+async def edit_menu(event: Event, ctx: AppContext, session: HackSession) -> None:
+    if not session.data.get("editing_id"):
+        raise UserError("Откройте существующий хакатон через /hack")
     tz = await ctx.zone(session.chat_id)
-    lines = ["📝 <b>Проверьте данные хакатона</b>"]
-    if session.data.get("llm_imported"):
-        lines.append("Данные дополнены LLM. Проверьте их перед публикацией.")
-        if session.data.get("llm_model"):
-            lines.append(f"Модель: {escape(session.data['llm_model'])}")
-    if session.data.get("dates_reviewed"):
-        lines.append("Нейросеть дополнительно перепроверила даты по источникам.")
+    lines = ["✏️ <b>Настройки хакатона</b>", "Изменения сохраняются сразу."]
     for key, label in FIELD_LABELS.items():
         value = session.data.get(key)
-        if key == "spec_url" and session.data.get("spec_file_id"):
-            value = session.data.get("spec_file_name") or "файл"
         if key in DATE_FIELDS and value:
             value = format_dt(datetime.fromisoformat(value), tz)
         lines.append(
-            f"<b>{label}:</b> {escape(str(value)[:160]) if value is not None else 'не заполнено'}"
+            f"<b>{label}:</b> {escape(str(value)[:160]) if value is not None else 'не задано'}"
         )
-    lines.append(f"Часовой пояс: {escape(tz.key)}")
-    checkpoints = session.data.get("checkpoints", [])
-    lines.append(f"Чекпоинты: {len(checkpoints)}")
-    if session.data.get("import_sources"):
-        label = "Положение / регламент" if session.data.get("regulations_import") else "Источники"
-        lines.append(f"📄 <b>{label}:</b>")
-        for index, url in enumerate(session.data["import_sources"][:3], 1):
-            lines.append(f'<a href="{escape(url, quote=True)}">Документ {index}</a>')
-    elif session.data.get("document_links"):
-        lines.append("📎 Найдены ссылки на документы, но прочитать их не удалось:")
-        for index, url in enumerate(session.data["document_links"][:3], 1):
-            lines.append(f'<a href="{escape(url, quote=True)}">Открыть документ {index}</a>')
-    valid = True
-    try:
-        validate_hack(session.data)
-    except UserError as exc:
-        lines.append(f"\n⚠️ {exc.message}")
-        valid = False
-    if session.data.get("import_error"):
-        lines.append(f"\nℹ️ {session.data['import_error']}")
-    if error:
-        lines.append(f"\n❌ {error}")
     fields = list(FIELD_LABELS.items())
     rows = [
         [button(session, label, "field", key) for key, label in fields[index : index + 2]]
         for index in range(0, len(fields), 2)
     ]
-    rows.append([button(session, f"📍 Чекпоинты ({len(checkpoints)})", "checkpoints")])
-    if valid:
-        label = (
-            "✅ Сохранить изменения"
-            if session.data.get("editing_id")
-            else "✅ Опубликовать и начать голосование"
-        )
-        rows.append([button(session, label, "publish")])
-    rows.append([button(session, "В меню", "menu"), button(session, "Отменить черновик", "cancel")])
-    if target is not None and isinstance(event, Message):
-        try:
-            await edit_personal_reply(event, target, "\n".join(lines), reply_markup=keyboard(rows))
-        except TelegramAPIError:
-            # An expired progress panel may be replaced only with another personal message.
-            await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows), edit=False)
-    else:
-        await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows))
+    rows.append([button(session, "Чекпоинты", "checkpoints")])
+    rows.append([button(session, "Назад", "open", session.data["editing_id"])])
+    await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows))
+
+
+async def saved_edit(ctx: AppContext, session: HackSession) -> HackSession:
+    hack_id = await ctx.hacks.publish(session)
+    await ctx.storage.workflow.delete_session(session)
+    await ctx.hack_notifications.flush()
+    return await ctx.hacks.edit(hack_id, session.user_id)
+
+
+async def creation_result(event: Event, ctx: AppContext, hack_id: int) -> None:
+    message = event.message if isinstance(event, CallbackQuery) else event
+    hack = await ctx.hacks.hackathon(hack_id, event.from_user.id)
+    session = await ctx.storage.workflow.new_session(
+        event.from_user.id, message.chat.id, "view", {"hack_id": hack_id}
+    )
+    await personal_reply(
+        event,
+        f"✅ Хакатон <b>{escape(hack.display_name)}</b> создан. Голосование открыто.",
+        reply_markup=keyboard([[button(session, "Открыть хакатон", "open", hack_id)]]),
+    )
+    await ctx.hack_notifications.flush()
 
 
 async def import_message(
     message: Message, ctx: AppContext, raw: str, *, explicit: bool = False
-) -> HackSession | None:
-    async with ImportProgress(message, await ctx.zone(message.chat.id)) as progress:
-        imported = await ctx.hacks.import_post(
-            message.chat.id,
-            message.from_user.id,
-            raw,
-            explicit=explicit,
-            on_progress=progress.update,
-        )
-    if imported is not None:
-        await preview(message, ctx, imported, target=progress.panel)
-    elif progress.panel is not None:
-        await edit_personal_reply(message, progress.panel, "Хакатон в сообщении не найден")
-    return imported
+) -> bool:
+    if not explicit and not HACK_RE.search(raw) and not URL_RE.search(raw):
+        return False
+    await ctx.storage.workflow.clear_forms(message.from_user.id, message.chat.id)
+    try:
+        async with ImportProgress(message, await ctx.zone(message.chat.id)) as progress:
+            hack = await ctx.hacks.import_post(
+                message.chat.id,
+                message.from_user.id,
+                raw,
+                explicit=explicit,
+                on_progress=progress.update,
+            )
+        if hack is not None:
+            await creation_result(message, ctx, hack.id)
+            return True
+        if progress.panel is not None:
+            await personal_reply(message, "Хакатон не создан: описание хакатона не найдено.")
+    except UserError as exc:
+        await personal_reply(message, f"❌ {escape(exc.message)}")
+    return False
 
 
 async def prompt(
     event: Event, ctx: AppContext, session: HackSession, field: str, error: str | None = None
 ) -> None:
-    session.step = f"input:{field}"
+    session.step = f"form:{field}"
     session.data.pop("_prompt_id", None)
     await ctx.storage.workflow.save_session(session)
     if field == "import":
         text = (
             "Пришлите сайт хакатона или прямую ссылку на положение / регламент. "
             "Бот найдёт документы и заполнит данные из них. "
-            "Сначала вы проверите данные, затем подтвердите публикацию."
+            "Если все обязательные данные найдены, хакатон создастся автоматически."
         )
     elif field == "checkpoint":
         text = "Введите чекпоинт: Название | ДД.ММ.ГГГГ ЧЧ:ММ"
@@ -205,14 +182,11 @@ async def prompt(
             text += "\nЗнак «-» — очистить поле."
     if error:
         text = f"❌ {error}\n\n" + text
-    text += "\nОтветьте на это личное сообщение. «Отмена» — вернуться к черновику."
+    text += "\nОтветьте на это личное сообщение. «Отмена» — прекратить ввод."
     sent = await personal_reply(
         event,
         text,
-        reply_markup=ForceReply(
-            selective=False, input_field_placeholder="Введите значение или «Отмена»"
-        ),
-        edit=False,
+        reply_markup=keyboard([[button(session, "Отмена", "cancel")]]),
     )
     if isinstance(sent, Message):
         session.data["_prompt_id"] = (
@@ -349,27 +323,8 @@ async def checkpoints_menu(event: Event, ctx: AppContext, session: HackSession) 
         rows.append([button(session, f"Удалить: {checkpoint['title'][:35]}", "cpdel", index)])
     if len(session.data.get("checkpoints", [])) < 20:
         rows.append([button(session, "➕ Добавить чекпоинт", "cpadd")])
-    rows.append([button(session, "К черновику", "preview")])
+    rows.append([button(session, "Назад", "edit_menu")])
     await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows))
-
-
-async def show_drafts(event: Event, ctx: AppContext, session: HackSession, page: int) -> None:
-    drafts = await ctx.storage.workflow.drafts(session.user_id, session.chat_id)
-    page = min(max(page, 0), max(0, (len(drafts) - 1) // 8))
-    rows = [
-        [
-            button(
-                session, str(draft.data.get("title") or "Новый хакатон")[:60], "resume", draft.token
-            )
-        ]
-        for draft in drafts[page * 8 : (page + 1) * 8]
-    ]
-    if page:
-        rows.append([button(session, "←", "drafts", page - 1)])
-    if (page + 1) * 8 < len(drafts):
-        rows.append([button(session, "→", "drafts", page + 1)])
-    rows.append([button(session, "В меню", "menu")])
-    await personal_reply(event, "📝 <b>Мои черновики</b>", reply_markup=keyboard(rows))
 
 
 @router.message(Command("hack"))
@@ -379,6 +334,7 @@ async def cmd_hack(message: Message, ctx: AppContext) -> None:
         raise usage("/hack [название]")
     await ctx.hacks.require_access(message.chat.id, message.from_user.id)
     if tokens:
+        await ctx.storage.workflow.clear_forms(message.from_user.id, message.chat.id)
         hack = await ctx.hackathon(message.chat.id, tokens[0].text)
         session = await ctx.storage.workflow.new_session(
             message.from_user.id, message.chat.id, "view", {"hack_id": hack.id}
@@ -406,52 +362,48 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
             await ctx.storage.workflow.save_session(session)
             await menu(callback, ctx, session)
         elif action in {"manual", "import"}:
+            await ctx.storage.workflow.clear_forms(session.user_id, session.chat_id)
             session = await ctx.storage.workflow.new_session(
                 session.user_id,
                 session.chat_id,
-                "preview",
-                {"checkpoints": [], "_wizard": action == "manual"},
+                "form:title" if action == "manual" else "form:import",
+                {"checkpoints": [], "_mode": "create" if action == "manual" else "import"},
             )
             await prompt(callback, ctx, session, "title" if action == "manual" else "import")
         elif action == "field":
-            if argument not in FIELD_LABELS:
-                raise UserError("Неизвестное поле")
+            if argument not in FIELD_LABELS or not session.data.get("editing_id"):
+                raise UserError("Откройте настройки существующего хакатона")
             await prompt(callback, ctx, session, argument)
-        elif action in {"preview", "checkpoints", "cpdel"}:
+        elif action == "edit_menu":
+            await edit_menu(callback, ctx, session)
+        elif action in {"checkpoints", "cpdel"}:
+            if not session.data.get("editing_id"):
+                raise UserError("Сначала создайте хакатон")
             if action == "cpdel":
                 index = int(argument)
                 if not 0 <= index < len(session.data.get("checkpoints", [])):
                     raise UserError("Чекпоинт уже удалён")
                 session.data["checkpoints"].pop(index)
-            session.step = "preview" if action == "preview" else "checkpoints"
+                session = await saved_edit(ctx, session)
+            session.step = "edit_checkpoints"
             await ctx.storage.workflow.save_session(session)
-            await (
-                preview(callback, ctx, session)
-                if action == "preview"
-                else checkpoints_menu(callback, ctx, session)
-            )
+            await checkpoints_menu(callback, ctx, session)
         elif action == "cpadd":
+            if not session.data.get("editing_id"):
+                raise UserError("Сначала создайте хакатон")
             await prompt(callback, ctx, session, "checkpoint")
         elif action == "cancel":
-            session.step = "cancelled"
-            await ctx.storage.workflow.save_session(session)
-            await menu(callback, ctx)
-        elif action == "drafts":
-            await show_drafts(callback, ctx, session, int(argument))
-        elif action == "resume":
-            draft = await ctx.hacks.session(session.user_id, argument)
-            if draft.chat_id != session.chat_id or draft.step in {"published", "cancelled", "menu"}:
-                raise UserError("Черновик недоступен")
-            draft.step = "preview"
-            await ctx.storage.workflow.save_session(draft)
-            await preview(callback, ctx, draft)
-        elif action == "publish":
-            hack_id = await ctx.hacks.publish(session)
-            session = await ctx.storage.workflow.new_session(
-                session.user_id, session.chat_id, "view", {"hack_id": hack_id}
-            )
-            await show_hack(callback, ctx, session, "✅ Сохранено. Общая карточка появится в чате.")
-            await ctx.hack_notifications.flush()
+            hack_id = session.data.get("editing_id")
+            await ctx.storage.workflow.delete_session(session)
+            if hack_id:
+                session = await ctx.storage.workflow.new_session(
+                    callback.from_user.id, callback.message.chat.id, "view", {"hack_id": hack_id}
+                )
+                await show_hack(callback, ctx, session)
+            else:
+                await menu(callback, ctx)
+        elif action in {"drafts", "resume", "preview", "publish"}:
+            raise UserError("Черновиков больше нет. Откройте /hack, чтобы создать хакатон заново")
         elif action in {"open", "card"}:
             hack_id = int(argument) if action == "open" else int(session.data["hack_id"])
             hack = await ctx.hacks.hackathon(hack_id, session.user_id)
@@ -462,7 +414,7 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
             await show_hack(callback, ctx, session)
         elif action == "edit":
             session = await ctx.hacks.edit(int(session.data["hack_id"]), session.user_id)
-            await preview(callback, ctx, session)
+            await edit_menu(callback, ctx, session)
         elif action == "vote":
             result = await ctx.hacks.vote(int(session.data["hack_id"]), session.user_id, argument)
             if argument == "yes" and result is None:
@@ -529,14 +481,11 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
     except (ValueError, KeyError):
         raise UserError("Кнопка устарела. Откройте /hack") from None
     except UserError as exc:
-        if session.step == "preview":
-            await preview(callback, ctx, session, exc.message)
-        else:
-            await personal_reply(
-                callback,
-                f"❌ {exc.message}",
-                reply_markup=keyboard([[button(session, "В меню", "menu")]]),
-            )
+        await personal_reply(
+            callback,
+            f"❌ {escape(exc.message)}",
+            reply_markup=keyboard([[button(session, "В меню", "menu")]]),
+        )
 
 
 @router.callback_query(F.data.startswith("hv:") | F.data.startswith("hm:"))
@@ -571,7 +520,7 @@ async def hack_input(message: Message, ctx: AppContext) -> None:
         return
     session = await ctx.storage.workflow.session(actor.id, chat_id=message.chat.id)
     private_input = message.chat.type == "private" or message.ephemeral_message_id is not None
-    if session and session.step.startswith("input:") and private_input:
+    if session and session.step.startswith("form:") and private_input:
         await ctx.hacks.require_access(session.chat_id, actor.id)
         field = session.step.split(":", 1)[1]
         expected = session.data.get("_prompt_id")
@@ -589,21 +538,22 @@ async def hack_input(message: Message, ctx: AppContext) -> None:
                 return
         raw = (message.text or message.caption or "").strip()
         if raw.lower() in {"отмена", "cancel"}:
-            session.step = "preview"
-            await ctx.storage.workflow.save_session(session)
-            await preview(message, ctx, session)
+            hack_id = session.data.get("editing_id")
+            await ctx.storage.workflow.delete_session(session)
+            if hack_id:
+                session = await ctx.storage.workflow.new_session(
+                    actor.id, message.chat.id, "view", {"hack_id": hack_id}
+                )
+                await show_hack(message, ctx, session)
+            else:
+                await menu(message, ctx)
+            return
+        if field == "import":
+            await ctx.storage.workflow.delete_session(session)
+            await import_message(message, ctx, raw, explicit=True)
             return
         try:
             tz = await ctx.zone(session.chat_id)
-            if field == "import":
-                imported = await import_message(message, ctx, raw, explicit=True)
-                if imported is None:
-                    raise UserError(
-                        "Хакатон не распознан. Пришлите пост с описанием или ссылку на его страницу"
-                    )
-                session.step = "cancelled"
-                await ctx.storage.workflow.save_session(session)
-                return
             if field == "checkpoint":
                 if len(session.data.get("checkpoints", [])) >= 20:
                     raise UserError("Можно добавить до 20 чекпоинтов")
@@ -618,15 +568,32 @@ async def hack_input(message: Message, ctx: AppContext) -> None:
                 session.data[field] = input_field(field, raw, tz)
                 if field == "spec_url":
                     session.data.update(spec_file_id=None, spec_file_name=None)
-            session.step = "preview"
-            await ctx.storage.workflow.save_session(session)
+            if session.data.get("editing_id"):
+                updated = await saved_edit(ctx, session)
+                await edit_menu(message, ctx, updated)
+                return
+            if session.data.get("_mode") != "create":
+                raise UserError("Этот ввод устарел. Откройте /hack")
+            if field in DATE_FIELDS and (issues := import_date_issues(session.data)):
+                raise UserError(issues[0])
             missing = next((key for key in REQUIRED_FIELDS if session.data.get(key) is None), None)
-            if session.data.get("_wizard") and missing:
+            if missing:
                 await prompt(message, ctx, session, missing)
-            else:
-                await preview(message, ctx, session)
+                return
+            validate_hack(session.data)
         except UserError as exc:
             await prompt(message, ctx, session, field, exc.message)
+            return
+        session.step = "completing"
+        await ctx.storage.workflow.save_session(session)
+        try:
+            hack_id = await ctx.hacks.publish(session)
+        except UserError as exc:
+            await personal_reply(message, "❌ Хакатон не создан. " + escape(exc.message))
+        else:
+            await creation_result(message, ctx, hack_id)
+        finally:
+            await ctx.storage.workflow.delete_session(session)
         return
     raw = message.text or message.caption or ""
     for entity in [*(message.entities or []), *(message.caption_entities or [])]:

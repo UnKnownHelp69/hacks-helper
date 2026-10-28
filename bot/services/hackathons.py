@@ -1,4 +1,4 @@
-"""Self-service hackathons: membership authorization, drafts, import and publication."""
+"""Self-service hackathons: membership authorization, creation, import and updates."""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ class HackathonService:
             {"title": checkpoint.title, "at": to_db(checkpoint.at)}
             for checkpoint in await self.storage.workflow.checkpoints(hack.id)
         ]
-        return await self.storage.workflow.new_session(user_id, hack.chat_id, "preview", data)
+        return await self.storage.workflow.new_session(user_id, hack.chat_id, "editing", data)
 
     async def publish(self, session: HackSession) -> int:
         await self.require_access(session.chat_id, session.user_id)
@@ -126,7 +126,7 @@ class HackathonService:
             and (previous is None or previous.repo != fields["repo"])
         ):
             await self.github.get_repo(fields["repo"])
-        return await self.storage.workflow.publish_draft(session, fields)
+        return await self.storage.workflow.save_hack(session, fields)
 
     async def vote(self, hack_id: int, user_id: int, choice: str) -> int | None:
         await self.hackathon(hack_id, user_id)
@@ -138,6 +138,16 @@ class HackathonService:
         await self.hackathon(hack_id, user_id)
         return await self.storage.workflow.join_team(hack_id, user_id, team_id, overflow=overflow)
 
+    async def create(self, chat_id: int, user_id: int, data: dict[str, Any]) -> Hackathon:
+        await self.require_access(chat_id, user_id)
+        validate_hack(data)
+        session = await self.storage.workflow.new_session(user_id, chat_id, "saving", data)
+        try:
+            hack_id = await self.publish(session)
+            return await self.hackathon(hack_id, user_id)
+        finally:
+            await self.storage.workflow.delete_session(session)
+
     async def import_post(
         self,
         chat_id: int,
@@ -146,7 +156,34 @@ class HackathonService:
         *,
         explicit: bool = False,
         on_progress: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
-    ) -> HackSession | None:
+    ) -> Hackathon | None:
+        data = await self.extract_import(
+            chat_id, user_id, text, explicit=explicit, on_progress=on_progress
+        )
+        if data is None:
+            return None
+        try:
+            validate_hack(data)
+            if data.get("llm_imported") and not data.get("dates_reviewed"):
+                raise UserError("Не удалось перепроверить даты из документов")
+        except UserError as exc:
+            details = data.get("import_error")
+            raise UserError(
+                "Хакатон не создан. "
+                + exc.message.replace("Заполните поля:", "Не найдены данные:")
+                + ("\n" + details if details else "")
+            ) from None
+        return await self.create(chat_id, user_id, data)
+
+    async def extract_import(
+        self,
+        chat_id: int,
+        user_id: int,
+        text: str,
+        *,
+        explicit: bool = False,
+        on_progress: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> dict[str, Any] | None:
         if not explicit and not HACK_RE.search(text) and not URL_RE.search(text):
             return None
         await self.require_access(chat_id, user_id)
@@ -162,7 +199,7 @@ class HackathonService:
             None,
         )
         # With a URL, advertising text is not an event-data source. A text-only post is
-        # still a manually supplied draft, to which the author can add the official document.
+        # still manually supplied event data, validated before creation.
         data: dict[str, Any] = {"checkpoints": []} if source else post
         recognized = explicit or bool(HACK_RE.search(text))
         if explicit and not source and not data.get("title"):
@@ -243,7 +280,7 @@ class HackathonService:
                     if key in reviewed
                 )
                 # Only audit date fields. A null retracts an unsupported date;
-                # unrelated facts and manually entered drafts are not rewritten.
+                # unrelated facts and manually entered forms are not rewritten.
                 data.update({key: reviewed[key] for key in DATE_FIELDS if key in reviewed})
                 data["dates_reviewed"] = True
                 if unconfirmed:
@@ -323,7 +360,7 @@ class HackathonService:
                         await report("Данные из документов найдены")
                         await audit_dates()
         except TimeoutError:
-            warning("Обработка заняла две минуты и завершена. Уже найденные данные сохранены.")
+            warning("Обработка заняла две минуты и завершена.")
         if not recognized:
             await report("Хакатон в сообщении не найден")
             return None
@@ -331,4 +368,4 @@ class HackathonService:
         data["import_sources"] = [page["url"] for page in pages]
         data["regulations_import"] = bool(documents)
         await self.require_access(chat_id, user_id)
-        return await self.storage.workflow.new_session(user_id, chat_id, "preview", data)
+        return data

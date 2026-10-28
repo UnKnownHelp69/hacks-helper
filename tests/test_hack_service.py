@@ -71,25 +71,22 @@ async def test_editing_existing_hack_does_not_depend_on_unchanged_github_repo(
     get_repo.assert_not_awaited()
 
 
-async def test_imported_post_is_a_persistent_owner_bound_draft(service, storage):
-    session = await service.import_post(
-        ALLOWED_CHAT, USER_ID, "Хакатон: начало 5 ноября 2026 в 10:00"
+async def test_incomplete_import_creates_neither_hackathon_nor_saved_form(service, storage):
+    with pytest.raises(UserError, match="Хакатон не создан"):
+        await service.import_post(ALLOWED_CHAT, USER_ID, "Хакатон: начало 5 ноября 2026 в 10:00")
+    assert await storage.hackathons.list(ALLOWED_CHAT) == []
+    assert await storage.workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is None
+
+
+async def test_failed_site_import_does_not_save_partial_data(service, storage, monkeypatch):
+    monkeypatch.setattr(
+        "bot.services.hackathons.fetch_public_page",
+        AsyncMock(side_effect=UserError("Сайт недоступен")),
     )
-    assert session.step == "preview" and session.data["start_at"].endswith("+00:00")
-    assert (await storage.workflow.session(USER_ID, session.token)).data == session.data
-    assert await storage.workflow.session(OTHER_ID, session.token) is None
-
-
-async def test_explicit_import_keeps_a_draft_when_site_cannot_be_read(service, monkeypatch):
-    async def unavailable(url):
-        raise UserError("Сайт недоступен")
-
-    monkeypatch.setattr("bot.services.hackathons.fetch_public_page", unavailable)
-    session = await service.import_post(
-        ALLOWED_CHAT, USER_ID, "https://event.example/", explicit=True
-    )
-    assert session.data["site_url"] == "https://event.example/"
-    assert "Сайт недоступен" in session.data["import_error"]
+    with pytest.raises(UserError, match="Хакатон не создан"):
+        await service.import_post(ALLOWED_CHAT, USER_ID, "https://event.example/", explicit=True)
+    assert await storage.workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is None
+    assert await storage.hackathons.list(ALLOWED_CHAT) == []
 
 
 def test_validation_rejects_missing_dates_and_invalid_team_bounds():
@@ -141,16 +138,15 @@ async def test_import_uses_rules_and_ignores_landing_and_advertising_post(
 ):
     pages, fetch = import_pages
     pages[RULES] += "<p>Начало 05.11.2026 10:00</p><p>Конец 07.11.2026 18:00</p>"
-    session = await service.import_post(
+    session = await service.extract_import(
         ALLOWED_CHAT, USER_ID, "Хакатон из поста\nКоманда от 80 до 90\n" + ROOT
     )
-    assert session.data["team_min"] == 2 and session.data["team_max"] == 5
-    assert session.data["start_at"] == "2026-11-05T07:00:00+00:00"
-    assert session.data["end_at"] == "2026-11-07T15:00:00+00:00"
-    assert session.data["spec_url"] == RULES and session.data["site_url"] == ROOT
-    assert session.data["import_sources"] == [RULES]
-    assert session.data["regulations_import"]
-    assert session.step == "preview"
+    assert session["team_min"] == 2 and session["team_max"] == 5
+    assert session["start_at"] == "2026-11-05T07:00:00+00:00"
+    assert session["end_at"] == "2026-11-07T15:00:00+00:00"
+    assert session["spec_url"] == RULES and session["site_url"] == ROOT
+    assert session["import_sources"] == [RULES]
+    assert session["regulations_import"]
     assert await storage.hackathons.list(ALLOWED_CHAT) == []
     assert [call.args[0] for call in fetch.await_args_list] == [ROOT, RULES]
 
@@ -161,10 +157,10 @@ async def test_no_rules_means_empty_draft_and_no_llm_fallback(service, import_pa
     service.llm.configured = True
     extract = AsyncMock()
     monkeypatch.setattr(service.llm, "extract", extract)
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
-    assert session.data.get("start_at") is None and session.data.get("team_max") is None
-    assert session.data["import_sources"] == []
-    assert "положение / регламент" in session.data["import_error"]
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
+    assert session.get("start_at") is None and session.get("team_max") is None
+    assert session["import_sources"] == []
+    assert "положение / регламент" in session["import_error"]
     extract.assert_not_awaited()
 
 
@@ -188,15 +184,15 @@ async def test_llm_receives_only_rules_and_additional_regulations(
         }
     )
     monkeypatch.setattr(service.llm, "extract", extract)
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, "Реклама: 2099\n" + ROOT)
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, "Реклама: 2099\n" + ROOT)
     extract.assert_awaited_once()
     call = extract.await_args
     assert call.args[0] == "" and call.args[2] == RULES
     assert "2099" not in str(call)
     assert [item["url"] for item in call.kwargs["previous_pages"]] == [other]
-    assert session.data["title"] == "Название из положения"
-    assert session.data["import_sources"] == [RULES, other]
-    assert session.data["site_url"] == ROOT
+    assert session["title"] == "Название из положения"
+    assert session["import_sources"] == [RULES, other]
+    assert session["site_url"] == ROOT
     assert [call.args[0] for call in fetch.await_args_list] == [ROOT, RULES, other]
 
 
@@ -206,16 +202,16 @@ async def test_public_document_viewer_is_followed_to_actual_download(service, im
     pages[ROOT] = '<h1>Хакатон</h1><a href="' + viewer + '">Положение</a>'
     pages[viewer] = '<p>Положение.pdf</p><a href="/s/token/download">Скачать</a>'
     pages[pdf] = "<pre>Положение о проведении хакатона. Команда от 3 до 4 человек</pre>"
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
-    assert session.data["import_sources"] == [pdf]
-    assert session.data["spec_url"] == pdf and session.data["team_min"] == 3
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
+    assert session["import_sources"] == [pdf]
+    assert session["spec_url"] == pdf and session["team_min"] == 3
     assert [call.args[0] for call in fetch.await_args_list] == [ROOT, viewer, pdf]
 
 
 async def test_direct_rules_link_does_not_need_a_landing_page(service, import_pages):
     _, fetch = import_pages
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, RULES)
-    assert session.data["team_min"] == 2 and session.data["import_sources"] == [RULES]
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, RULES)
+    assert session["team_min"] == 2 and session["import_sources"] == [RULES]
     fetch.assert_awaited_once_with(RULES)
 
 
@@ -225,9 +221,9 @@ async def test_llm_failure_preserves_document_parser_facts(service, import_pages
     service.llm.configured = True
     extract = AsyncMock(side_effect=UserError("LLM сбой"))
     monkeypatch.setattr(service.llm, "extract", extract)
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
-    assert session.data["start_at"] == "2026-11-05T07:00:00+00:00"
-    assert session.data["import_error"] == "LLM сбой"
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
+    assert session["start_at"] == "2026-11-05T07:00:00+00:00"
+    assert session["import_error"] == "LLM сбой"
     extract.assert_awaited_once()
 
 
@@ -247,9 +243,9 @@ async def test_personal_model_is_snapshotted_for_extraction_and_audit(
         return {"is_hackathon": True}
 
     monkeypatch.setattr(service.llm, "extract", extract)
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
     assert selections == [("gigachat", "GigaChat-Pro")] * 2
-    assert session.data["llm_model"] == "GigaChat-Pro"
+    assert session["llm_model"] == "GigaChat-Pro"
     assert await service.llm_selection(USER_ID) == ("openrouter", "another/model")
     assert await service.llm_selection(OTHER_ID) == ("openrouter", "openrouter/free")
 
@@ -276,9 +272,9 @@ async def test_discovery_and_document_limits_bound_cyclic_link_graph(
 
     fetch_mock = AsyncMock(side_effect=fetch)
     monkeypatch.setattr("bot.services.hackathons.fetch_public_page", fetch_mock)
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
     assert fetch_mock.await_count == (4 if documents else 6)
-    assert len(session.data["import_sources"]) == (3 if documents else 0)
+    assert len(session["import_sources"]) == (3 if documents else 0)
 
 
 async def test_import_timeout_preserves_facts_from_rules(service, import_pages, monkeypatch):
@@ -293,17 +289,17 @@ async def test_import_timeout_preserves_facts_from_rules(service, import_pages, 
         await asyncio.sleep(1)
 
     monkeypatch.setattr(service.llm, "extract", slow)
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
-    assert session.data["start_at"] == "2026-11-05T07:00:00+00:00"
-    assert "две минуты" in session.data["import_error"]
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
+    assert session["start_at"] == "2026-11-05T07:00:00+00:00"
+    assert "две минуты" in session["import_error"]
 
 
 async def test_unavailable_appendix_preserves_readable_rules(service, import_pages):
     pages, _ = import_pages
     pages[RULES] += '<a href="/reglament">Регламент</a>'
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
-    assert session.data["team_min"] == 2 and session.data["import_sources"] == [RULES]
-    assert "недоступен" in session.data["import_error"]
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
+    assert session["team_min"] == 2 and session["import_sources"] == [RULES]
+    assert "недоступен" in session["import_error"]
 
 
 @pytest.mark.parametrize(
@@ -338,21 +334,21 @@ async def test_conflicting_dates_get_one_document_based_review(
     async def progress(stage, data):
         stages.append(stage)
 
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT, on_progress=progress)
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT, on_progress=progress)
     assert extract.await_count == 2
     audit = extract.await_args_list[1]
     assert audit.args[0] == "" and audit.args[2] is None
     assert [page["url"] for page in audit.kwargs["previous_pages"]] == [RULES]
     assert "Окончание регистрации" in audit.kwargs["review_issues"][0]
     assert any("перепроверяет даты" in stage for stage in stages)
-    assert session.data["team_min"] == 2
+    assert session["team_min"] == 2
     if isinstance(review, dict):
-        assert session.data["registration_end"] == review["registration_end"]
-        assert session.data["dates_reviewed"]
+        assert session["registration_end"] == review["registration_end"]
+        assert session["dates_reviewed"]
     else:
-        assert session.data["registration_end"] == "2026-11-06T20:59:00+00:00"
+        assert session["registration_end"] == "2026-11-06T20:59:00+00:00"
     if not isinstance(review, dict) or review["registration_end"] != "2026-11-01T20:59:00+00:00":
-        assert session.data["import_error"]
+        assert session["import_error"]
 
 
 async def test_audit_uses_same_import_deadline(service, import_pages, monkeypatch):
@@ -371,9 +367,9 @@ async def test_audit_uses_same_import_deadline(service, import_pages, monkeypatc
         }
 
     monkeypatch.setattr(service.llm, "extract", extract)
-    session = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
-    assert session.data["start_at"] == "2026-11-05T07:00:00+00:00"
-    assert "две минуты" in session.data["import_error"]
+    session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
+    assert session["start_at"] == "2026-11-05T07:00:00+00:00"
+    assert "две минуты" in session["import_error"]
 
 
 async def test_audit_does_not_drop_dates_late_in_the_document(service, import_pages, monkeypatch):
@@ -382,6 +378,42 @@ async def test_audit_does_not_drop_dates_late_in_the_document(service, import_pa
     service.llm.configured = True
     extract = AsyncMock(return_value={"is_hackathon": True})
     monkeypatch.setattr(service.llm, "extract", extract)
-    await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
+    await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
     assert extract.await_count == 2
     assert "05.11.2026" in extract.await_args.kwargs["previous_pages"][0]["text"]
+
+
+async def test_successful_import_creates_immediately_and_is_deduplicated(
+    service, storage, import_pages
+):
+    pages, _ = import_pages
+    pages[RULES] += (
+        "<p>Регистрация до 01.11.2026 23:59</p><p>Начало 05.11.2026 10:00</p>"
+        "<p>Конец 07.11.2026 18:00</p>"
+    )
+    first = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
+    second = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
+    assert first.id == second.id
+    assert len(await storage.hackathons.list(ALLOWED_CHAT)) == 1
+    assert await storage.workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is None
+    assert len(await storage.workflow.dirty_publications()) == 1
+
+
+async def test_import_with_failed_date_review_cannot_create_automatically(
+    service, storage, monkeypatch
+):
+    data = {
+        "title": "Хакатон",
+        "registration_end": "2026-11-01T20:59:00+00:00",
+        "start_at": "2026-11-05T07:00:00+00:00",
+        "end_at": "2026-11-07T15:00:00+00:00",
+        "team_min": 2,
+        "team_max": 5,
+        "checkpoints": [],
+        "llm_imported": True,
+    }
+    monkeypatch.setattr(service, "extract_import", AsyncMock(return_value=data))
+    with pytest.raises(UserError, match="перепроверить даты"):
+        await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
+    assert await storage.hackathons.list(ALLOWED_CHAT) == []
+    assert await storage.workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is None
