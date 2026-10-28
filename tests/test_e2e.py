@@ -572,7 +572,7 @@ async def test_non_admin_manual_creation_edit_and_ephemeral_input(app):
     ]
     assert (
         len(shared) == 1
-        and shared[0].reply_markup.inline_keyboard[0][0].callback_data == f"hv:{hack.id}:yes"
+        and shared[0].reply_markup.inline_keyboard[0][0].callback_data == f"hm:{hack.id}"
     )
     bob = tg_user(3003, "bob_user", "Bob")
     await send(app, f"/hack {hack.slug}", bob)
@@ -1135,3 +1135,63 @@ async def test_cancel_edit_prompt_returns_to_card_without_changing_hackathon(app
     assert (await app["storage"].hackathons.get_by_id(hack.id)).title == hack.title
     assert "Регистрация до:" in private_panel(app).text
     assert "Введите:" not in private_panel(app).text
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("choice", [None, "yes", "no", "maybe"])
+async def test_participation_button_matches_membership_in_personal_and_shared_cards(
+    app, chat_id, choice
+):
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    hack = await create_hack(app, chat_id=chat_id)
+    if choice is not None:
+        await app["storage"].workflow.vote(hack.id, USER_ID, choice)
+    await send(app, f"/hack {hack.slug}", ALICE, chat_id)
+    expected = "❌ Нет" if choice == "yes" else "✅ Участвую"
+    buttons = private_panel(app, chat_id=chat_id).reply_markup.inline_keyboard
+    assert [b.text for row in buttons for b in row if b.text in {"❌ Нет", "✅ Участвую"}] == [
+        expected
+    ]
+    _, markup = await app["ctx"].hack_notifications.card(hack)
+    assert [
+        b.text for row in markup.inline_keyboard for b in row if b.callback_data.startswith("hv:")
+    ] == ([expected] if chat_id > 0 else [])
+    assert any(b.callback_data == f"hm:{hack.id}" for row in markup.inline_keyboard for b in row)
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+async def test_participation_buttons_switch_in_place_after_joining_and_leaving(app, chat_id):
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    hack = await create_hack(app, chat_id=chat_id)
+    await send(app, f"/hack {hack.slug}", ALICE, chat_id)
+    editing = await app["ctx"].hacks.edit(hack.id, USER_ID)
+    await app["ctx"].hacks.publish(editing)
+    await app["ctx"].hack_notifications.flush()
+    await send(app, f"/hack {hack.slug}", ALICE, chat_id)
+    initial = private_panel(app, chat_id=chat_id)
+    panel_id = initial.ephemeral_message_id if chat_id < 0 else initial.message_id
+    for label, participating in (("Участвую", True), ("Нет", False), ("Участвую", True)):
+        await click(app, label, chat_id=chat_id)
+        current = private_panel(app, chat_id=chat_id)
+        assert (current.ephemeral_message_id if chat_id < 0 else current.message_id) == panel_id
+        assert (USER_ID in await app["storage"].hackathons.members(hack.id)) == participating
+        assert [
+            b.text
+            for row in current.reply_markup.inline_keyboard
+            for b in row
+            if b.text in {"❌ Нет", "✅ Участвую"}
+        ] == (["❌ Нет"] if participating else ["✅ Участвую"])
+
+
+async def test_team_page_does_not_offer_join_again_after_registration_closes(app):
+    hack = await create_hack(app)
+    await send(app, f"/hack {hack.slug}", ALICE)
+    await app["storage"].workflow.vote(hack.id, USER_ID, "yes")
+    editing = await app["ctx"].hacks.edit(hack.id, USER_ID)
+    editing.data["registration_end"] = "2026-01-01T00:00:00+00:00"
+    await app["ctx"].hacks.publish(editing)
+    await send(app, f"/hack {hack.slug}", ALICE)
+    await click(app, "Команды")
+    assert not any(
+        "Участвую" in b.text for row in private_panel(app).reply_markup.inline_keyboard for b in row
+    )

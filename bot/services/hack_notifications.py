@@ -70,14 +70,17 @@ class HackNotifications:
             lines.append(" · ".join(materials))
         checkpoints = await self.storage.workflow.checkpoints(hack.id)
         rows = []
-        if hack.is_active:
+        if hack.is_active and hack.chat_id > 0:
+            participating = hack.chat_id in members
             rows.append(
                 [
-                    InlineKeyboardButton(text="✅ Участвую", callback_data=f"hv:{hack.id}:yes"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data=f"hv:{hack.id}:no"),
+                    InlineKeyboardButton(
+                        text="❌ Нет" if participating else "✅ Участвую",
+                        callback_data=f"hv:{hack.id}:{'no' if participating else 'yes'}",
+                    ),
                 ]
             )
-        else:
+        elif not hack.is_active:
             lines.append("🏁 Хакатон завершён")
         details = [InlineKeyboardButton(text="Открыть", callback_data=f"hm:{hack.id}")]
         if checkpoints:

@@ -200,10 +200,15 @@ async def show_hack(event: Event, ctx: AppContext, session: HackSession, notice:
     checkpoints = await ctx.storage.workflow.checkpoints(hack.id)
     rows = []
     if hack.is_active and hack.end_at > utcnow():
+        participating = session.user_id in await ctx.storage.hackathons.members(hack.id)
         rows.append(
             [
-                button(session, "✅ Участвую", "vote", "yes"),
-                button(session, "❌ Нет", "vote", "no"),
+                button(
+                    session,
+                    "❌ Нет" if participating else "✅ Участвую",
+                    "vote",
+                    "no" if participating else "yes",
+                ),
             ]
         )
     details = [button(session, "👥 Команды", "teams", 0)]
@@ -262,7 +267,7 @@ async def show_teams(event: Event, ctx: AppContext, session: HackSession, page: 
         rows.append(pages)
     if can_join:
         rows.append([button(session, "➕ Новая команда", "newteam")])
-    elif hack.is_active:
+    elif hack.is_active and hack.end_at > utcnow() and session.user_id not in votes["yes"]:
         rows.append([button(session, "✅ Участвую", "vote", "yes")])
     rows.append([button(session, "К карточке", "card"), button(session, "В меню", "menu")])
     await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows))
