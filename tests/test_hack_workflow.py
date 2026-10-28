@@ -40,11 +40,11 @@ async def test_votes_form_team_once_without_admin_permissions(storage):
     hack_id = await storage.workflow.save_hack(session, fields)
     await asyncio.gather(*(storage.workflow.vote(hack_id, user_id, "yes") for user_id in (1, 2, 3)))
     teams = await storage.workflow.teams(hack_id)
-    assert len(teams) == 1 and teams[0].members == [1, 2]
+    assert len(teams) == 1 and teams[0].members == [1, 2, 3]
     assert await storage.hackathons.members(hack_id) == [1, 2, 3]
     assert len(await storage.workflow.pending_notices()) == 1
     await asyncio.gather(*(storage.workflow.vote(hack_id, 2, "yes") for _ in range(3)))
-    assert (await storage.workflow.teams(hack_id))[0].members == [1, 2]
+    assert (await storage.workflow.teams(hack_id))[0].members == [1, 2, 3]
     assert len(await storage.workflow.pending_notices()) == 1
     await storage.workflow.join_team(hack_id, 3, teams[0].id)
     await storage.workflow.vote(hack_id, 4, "yes")
@@ -57,17 +57,41 @@ async def test_votes_form_team_once_without_admin_permissions(storage):
 async def test_new_team_recruits_and_switching_vote_removes_membership(storage):
     session, fields = await draft(storage)
     hack_id = await storage.workflow.save_hack(session, fields)
-    for user_id in (1, 2, 3):
+    for user_id in (1, 2, 3, 4):
         await storage.workflow.vote(hack_id, user_id, "yes")
-    team_id = await storage.workflow.join_team(hack_id, 3, None)
-    assert await storage.workflow.vote(hack_id, 4, "yes") == team_id
+    team_id = await storage.workflow.join_team(hack_id, 4, None)
+    assert await storage.workflow.vote(hack_id, 5, "yes") == team_id
     assert len(await storage.workflow.pending_notices()) == 2
-    await storage.workflow.vote(hack_id, 3, "no")
+    await storage.workflow.vote(hack_id, 4, "no")
     teams = await storage.workflow.teams(hack_id)
-    assert teams[1].members == [4]
-    assert not await storage.hackathons.is_member(hack_id, 3)
+    assert teams[1].members == [5]
+    assert not await storage.hackathons.is_member(hack_id, 4)
     with pytest.raises(UserError, match="Участвую"):
-        await storage.workflow.join_team(hack_id, 3, team_id)
+        await storage.workflow.join_team(hack_id, 4, team_id)
+
+
+async def test_member_cannot_create_another_team(storage):
+    session, fields = await draft(storage)
+    hack_id = await storage.workflow.save_hack(session, fields)
+    team_id = await storage.workflow.vote(hack_id, USER_ID, "yes")
+    with pytest.raises(UserError, match="уже состоите"):
+        await storage.workflow.join_team(hack_id, USER_ID, None)
+    teams = await storage.workflow.teams(hack_id)
+    assert len(teams) == 1 and teams[0].id == team_id and teams[0].members == [USER_ID]
+
+
+async def test_new_team_choice_is_rechecked_if_a_place_has_become_available(storage):
+    session, fields = await draft(storage)
+    hack_id = await storage.workflow.save_hack(session, fields)
+    for user_id in (1, 2, 3, 4):
+        await storage.workflow.vote(hack_id, user_id, "yes")
+    await storage.workflow.vote(hack_id, 2, "no")
+    with pytest.raises(UserError, match="ещё есть места"):
+        await storage.workflow.join_team(hack_id, 4, None)
+    teams = await storage.workflow.teams(hack_id)
+    assert len(teams) == 1 and teams[0].members == [1, 3]
+    await storage.workflow.join_team(hack_id, 4, teams[0].id)
+    assert (await storage.workflow.teams(hack_id))[0].members == [1, 3, 4]
 
 
 async def test_cross_hackathon_team_and_expired_registration_are_rejected(storage):

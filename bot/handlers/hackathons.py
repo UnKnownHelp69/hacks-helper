@@ -15,7 +15,7 @@ from aiogram.types import (
 
 from bot.context import AppContext
 from bot.db.database import utcnow
-from bot.db.models import HACK_ACTIVE, HACK_FINISHED, HackSession
+from bot.db.models import HACK_ACTIVE, HACK_FINISHED, HackSession, Team
 from bot.errors import UserError
 from bot.handlers.base import usage
 from bot.handlers.import_progress import ImportProgress
@@ -23,6 +23,7 @@ from bot.handlers.interactive import callback_session, keyboard, session_button
 from bot.middlewares.security import command_name
 from bot.respond import personal_options, personal_reply
 from bot.services.args import parse_command
+from bot.services.formatting import split_message
 from bot.services.hack_data import (
     DATE_FIELDS,
     FIELD_LABELS,
@@ -232,7 +233,6 @@ async def show_teams(event: Event, ctx: AppContext, session: HackSession, page: 
     teams = await ctx.storage.workflow.teams(hack.id)
     votes = await ctx.storage.workflow.votes(hack.id)
     mine = next((team for team in teams if session.user_id in team.members), None)
-    page = min(max(page, 0), max(0, (len(teams) - 1) // 8))
     lines = [
         f"👥 <b>{escape(hack.display_name)}</b>",
         f"Минимум: {hack.team_min}, максимум: {hack.team_max}",
@@ -240,32 +240,58 @@ async def show_teams(event: Event, ctx: AppContext, session: HackSession, page: 
     lines.append(f"Моя команда: {escape(mine.name) if mine else 'не выбрана'}")
     rows = []
     can_join = (
-        session.user_id in votes["yes"] and hack.is_active and hack.registration_end > utcnow()
+        mine is None
+        and session.user_id in votes["yes"]
+        and hack.is_active
+        and hack.registration_end > utcnow()
     )
-    for team in teams[page * 8 : (page + 1) * 8]:
+    # Keep complete names and repeat the team heading when a large roster spans pages.
+    pages: list[tuple[list[str], list[Team]]] = [([], [])]
+    for team in teams:
         state = "готова" if len(team.members) >= hack.team_min else "набор"
-        lines.append(f"{escape(team.name)}: {len(team.members)}/{hack.team_max}, {state}")
-        row = [button(session, f"Состав: {team.name}", "roster", f"{team.id}-0")]
-        if can_join and (mine is None or mine.id != team.id):
-            row.append(
-                button(
-                    session,
-                    "Вступить" if len(team.members) < hack.team_max else "Сверх лимита",
-                    "join",
-                    team.id,
-                )
+        heading = f"<b>{escape(team.name)}</b>: {len(team.members)}/{hack.team_max}, {state}"
+        members = [
+            "• " + (await ctx.directory.lookup(hack.chat_id, user_id)).mention
+            for user_id in team.members
+        ]
+        for roster in split_message("\n".join(members) or "Пока никого", limit=2800):
+            block = heading + "\n" + roster
+            blocks, visible_teams = pages[-1]
+            if blocks and (
+                len(visible_teams) >= 8
+                or len("\n\n".join([*blocks, block]).encode("utf-16-le")) // 2 > 3000
+            ):
+                blocks, visible_teams = [], []
+                pages.append((blocks, visible_teams))
+            blocks.append(block)
+            if team not in visible_teams:
+                visible_teams.append(team)
+    page = min(max(page, 0), len(pages) - 1)
+    blocks, visible_teams = pages[page]
+    lines.extend(["", "\n\n".join(blocks)])
+    for team in visible_teams:
+        if can_join:
+            action_label = "Вступить" if len(team.members) < hack.team_max else "Сверх лимита"
+            rows.append(
+                [
+                    button(
+                        session,
+                        f"{action_label}: {team.name}",
+                        "join",
+                        team.id,
+                    ),
+                ]
             )
-        rows.append(row)
     if not teams:
         lines.append("Команд пока нет. Выберите «Участвую», чтобы начать набор.")
-    pages = []
+    navigation = []
     if page:
-        pages.append(button(session, "←", "teams", page - 1))
-    if (page + 1) * 8 < len(teams):
-        pages.append(button(session, "→", "teams", page + 1))
-    if pages:
-        rows.append(pages)
-    if can_join:
+        navigation.append(button(session, "←", "teams", page - 1))
+    if page + 1 < len(pages):
+        navigation.append(button(session, "→", "teams", page + 1))
+    if navigation:
+        rows.append(navigation)
+    if can_join and all(len(team.members) >= hack.team_max for team in teams):
         rows.append([button(session, "➕ Новая команда", "newteam")])
     elif hack.is_active and hack.end_at > utcnow() and session.user_id not in votes["yes"]:
         rows.append([button(session, "✅ Участвую", "vote", "yes")])

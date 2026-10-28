@@ -688,7 +688,15 @@ async def test_votes_team_choices_and_duplicate_new_team_click(app):
     assert teams[0].members == [2002, 3003]
     await send(app, "/hack", actors[2])
     await press(app, f"hv:{hack_id}:yes", actors[2])
-    await click(app, "Вступить", actors[2])
+    await click(app, "Команды", actors[2])
+    panel = private_panel(app, actors[2])
+    assert all(f"@member_{actor.id}" in panel.text for actor in actors[:3])
+    assert not any(
+        word in item.text
+        for row in panel.reply_markup.inline_keyboard
+        for item in row
+        for word in ("Новая команда", "Состав:", "Вступить", "Сверх лимита")
+    )
     await send(app, "/hack", actors[3])
     await press(app, f"hv:{hack_id}:yes", actors[3])
     await click(app, "Сверх лимита", actors[3])
@@ -1195,3 +1203,85 @@ async def test_team_page_does_not_offer_join_again_after_registration_closes(app
     assert not any(
         "Участвую" in b.text for row in private_panel(app).reply_markup.inline_keyboard for b in row
     )
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+async def test_team_list_shows_all_rosters_with_telegram_aliases_in_place(app, chat_id):
+    from tests.test_hack_workflow import draft
+
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    _, fields = await draft(app["storage"])
+    session = await app["storage"].workflow.new_session(USER_ID, chat_id, "preview")
+    hack_id = await app["storage"].workflow.save_hack(session, fields)
+    hack = await app["storage"].hackathons.get_by_id(hack_id)
+    actors = [
+        ALICE,
+        tg_user(3003, None, "Без <алиаса>"),
+        tg_user(4004, "bob"),
+        tg_user(5005, "eve"),
+    ]
+    for actor in actors:
+        app["session"].members[actor.id] = actor
+        await app["ctx"].directory.remember(actor)
+        await app["storage"].workflow.vote(hack_id, actor.id, "yes")
+    await app["storage"].workflow.join_team(hack_id, actors[-1].id, None)
+    await send(app, f"/hack {hack.slug}", ALICE, chat_id)
+    initial = private_panel(app, chat_id=chat_id)
+    await click(app, "Команды", chat_id=chat_id)
+    panel = private_panel(app, chat_id=chat_id)
+    assert panel.message_id == initial.message_id
+    assert panel.ephemeral_message_id == initial.ephemeral_message_id
+    for label in ("Команда 1", "Команда 2", "@alice_tg", "@bob", "@eve"):
+        assert label in panel.text
+    assert '<a href="tg://user?id=3003">Без &lt;алиаса&gt;</a>' in panel.text
+    assert [b.text for row in panel.reply_markup.inline_keyboard for b in row] == [
+        "К карточке",
+        "В меню",
+    ]
+
+
+async def test_large_roster_pages_keep_every_alias_in_one_personal_panel(app):
+    from bot.respond import html_to_plain
+    from tests.test_hack_workflow import draft
+
+    session, fields = await draft(app["storage"])
+    fields["team_max"] = 100
+    hack_id = await app["storage"].workflow.save_hack(session, fields)
+    hack = await app["storage"].hackathons.get_by_id(hack_id)
+    actors = [ALICE, *[tg_user(uid, f"member_{uid:025d}") for uid in range(3000, 3095)]]
+    for actor in actors:
+        app["session"].members[actor.id] = actor
+        await app["ctx"].directory.remember(actor)
+        await app["storage"].workflow.vote(hack_id, actor.id, "yes")
+    await send(app, f"/hack {hack.slug}", ALICE)
+    await click(app, "Команды")
+    first = private_panel(app)
+    panels = [first]
+    while any(b.text == "→" for row in panels[-1].reply_markup.inline_keyboard for b in row):
+        await click(app, "→")
+        panels.append(private_panel(app))
+        assert len(panels) < 10
+    assert len(panels) > 1
+    for panel in panels:
+        assert panel.ephemeral_message_id == first.ephemeral_message_id
+        assert len(html_to_plain(panel.text).encode("utf-16-le")) // 2 <= 3900
+        assert "Команда 1" in panel.text
+    text = "\n".join(panel.text for panel in panels)
+    assert all(f"@{actor.username}" in text for actor in actors)
+    assert len([m for m in app["session"].requests if isinstance(m, SendMessage)]) == 1
+
+
+async def test_unassigned_participant_cannot_create_team_while_a_place_is_available(app):
+    from tests.test_hack_workflow import draft
+
+    session, fields = await draft(app["storage"])
+    hack_id = await app["storage"].workflow.save_hack(session, fields)
+    for uid in (3003, 4004, 5005, USER_ID):
+        await app["storage"].workflow.vote(hack_id, uid, "yes")
+    await app["storage"].workflow.vote(hack_id, 4004, "no")
+    hack = await app["storage"].hackathons.get_by_id(hack_id)
+    await send(app, f"/hack {hack.slug}", ALICE)
+    await click(app, "Команды")
+    labels = [b.text for row in private_panel(app).reply_markup.inline_keyboard for b in row]
+    assert "Вступить: Команда 1" in labels
+    assert not any("Новая команда" in label for label in labels)

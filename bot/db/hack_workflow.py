@@ -270,7 +270,7 @@ class HackWorkflowRepo:
                     "SELECT t.id FROM hack_teams t LEFT JOIN hack_team_members m ON m.team_id=t.id "
                     "WHERE t.hackathon_id=? GROUP BY t.id "
                     "HAVING COUNT(m.user_id) < ? ORDER BY t.id LIMIT 1",
-                    (hack_id, hack["team_min"]),
+                    (hack_id, hack["team_max"]),
                 )
                 any_team = await _one(
                     conn, "SELECT id FROM hack_teams WHERE hackathon_id=? LIMIT 1", (hack_id,)
@@ -324,6 +324,16 @@ class HackWorkflowRepo:
                         "Команда заполнена. Выберите присоединение сверх лимита или новую команду"
                     )
             else:
+                if current:
+                    raise UserError("Вы уже состоите в команде")
+                available = await _one(
+                    conn,
+                    "SELECT t.id FROM hack_teams t LEFT JOIN hack_team_members m ON m.team_id=t.id "
+                    "WHERE t.hackathon_id=? GROUP BY t.id HAVING COUNT(m.user_id) < ? LIMIT 1",
+                    (hack_id, hack["team_max"]),
+                )
+                if available:
+                    raise UserError("В командах ещё есть места. Выберите существующую команду")
                 team_id = await self._new_team(conn, hack_id)
             await conn.execute(
                 "INSERT INTO hack_team_members(hackathon_id,user_id,team_id) VALUES(?,?,?) "
