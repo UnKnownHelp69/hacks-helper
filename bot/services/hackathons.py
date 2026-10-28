@@ -14,21 +14,24 @@ from bot.db.models import Hackathon, HackSession
 from bot.db.repositories import Storage
 from bot.errors import UserError
 from bot.services.github import GitHubClient
-from bot.services.hack_data import validate_hack
+from bot.services.hack_data import DATE_FIELDS, import_date_issues, validate_hack
 from bot.services.hack_import import (
     HACK_RE,
     URL_RE,
     extract_page,
     extract_post,
     fetch_public_page,
+    is_regulation,
     public_url,
+    regulation_links,
 )
 from bot.services.hack_llm import HackathonLLM, page_context
 from bot.services.reminders import chat_zone
 from bot.services.users import UserDirectory
 
 IMPORT_TIMEOUT_SECONDS = 120
-MAX_IMPORT_DOCUMENTS = 4
+MAX_DISCOVERY_PAGES = 6
+MAX_REGULATION_DOCUMENTS = 3
 
 
 class HackathonService:
@@ -147,23 +150,10 @@ class HackathonService:
         if not explicit and not HACK_RE.search(text) and not URL_RE.search(text):
             return None
         await self.require_access(chat_id, user_id)
-        # Snapshot once: changing preferences cannot switch providers halfway through an import.
         selection = await self.llm_selection(user_id)
         tz = await chat_zone(self.storage, chat_id, self.settings.default_timezone)
-        data = extract_post(text, tz)
-        if explicit and not data.get("title"):
-            title = next(
-                (
-                    line.strip()
-                    for line in text.splitlines()
-                    if line.strip() and not URL_RE.fullmatch(line.strip())
-                ),
-                None,
-            )
-            if title:
-                data["title"] = title[:100]
-        post_data = dict(data)
-        source = data.get("site_url") or next(
+        post = extract_post(text, tz)
+        source = post.get("site_url") or next(
             (
                 match.group()
                 for match in URL_RE.finditer(text)
@@ -171,19 +161,24 @@ class HackathonService:
             ),
             None,
         )
+        # With a URL, advertising text is not an event-data source. A text-only post is
+        # still a manually supplied draft, to which the author can add the official document.
+        data: dict[str, Any] = {"checkpoints": []} if source else post
         recognized = explicit or bool(HACK_RE.search(text))
+        if explicit and not source and not data.get("title"):
+            title = next((line.strip() for line in text.splitlines() if line.strip()), None)
+            if title:
+                data["title"] = title[:100]
         if source:
-            # The read path reports invalid URLs without fetching them.
             with suppress(UserError):
                 source = public_url(source)
+            data["site_url"] = source
             data["source_key"] = "url:" + hashlib.sha256(source.encode()).hexdigest()
         else:
             data["source_key"] = "post:" + hashlib.sha256(text.strip().encode()).hexdigest()
+        pages: list[dict[str, Any]] = []  # Official documents only; no landing pages or viewers.
+        documents: list[tuple[str, str]] = []
         visited: set[str] = set()
-        pages: list[dict[str, Any]] = []
-        discovered: set[str] = set()
-        pending: list[str] = []
-        read_attempts = 0
 
         async def report(stage: str) -> None:
             if on_progress:
@@ -193,114 +188,140 @@ class HackathonService:
             if message not in data.get("import_error", ""):
                 data["import_error"] = " ".join(filter(None, [data.get("import_error"), message]))
 
-        def merge(values: dict[str, Any], *, llm: bool = False) -> list[str]:
+        def source_context(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
+                {
+                    "url": page["url"],
+                    "text": page["text"],
+                    "json_ld": page["json_ld"][:4000],
+                }
+                for page in items
+            ]
+
+        def merge(values: dict[str, Any], *, llm: bool = False) -> None:
             nonlocal recognized
             values = dict(values)
             recognized = values.pop("is_hackathon", False) or recognized
-            follow = values.pop("follow_urls", [])
             checkpoints = values.pop("checkpoints", [])
+            # The source website and selected regulations are controlled by discovery.
+            for key in ("follow_urls", "site_url", "source_url", "spec_url"):
+                values.pop(key, None)
             data.update({key: value for key, value in values.items() if value is not None})
             if checkpoints:
                 combined = [*data.get("checkpoints", []), *checkpoints]
                 unique = {(item["title"].casefold(), item["at"]): item for item in combined}
                 data["checkpoints"] = list(unique.values())[:20]
-            data.update({key: value for key, value in post_data.items() if value})
             if llm:
                 data["llm_imported"] = True
-            return follow
 
-        async def read(url: str) -> tuple[str, str]:
-            nonlocal read_attempts
-            read_attempts += 1
-            url = public_url(url)
-            visited.add(url)
-            html, final_url = await fetch_public_page(url)
-            visited.add(final_url)
-            context = page_context(html, final_url)
-            pages.append(context)
-            discovered.update(link["url"] for link in context["links"])
-            # Keep the original website and provenance when parsing related pages.
-            page = extract_page(html, final_url, tz)
-            if len(pages) > 1:
-                for key in ("site_url", "source_url", "title"):
-                    page.pop(key, None)
-                page = {
-                    key: value
-                    for key, value in page.items()
-                    if data.get(key) is None or key in {"checkpoints", "is_hackathon"}
-                }
-            merge(page)
-            return html, final_url
+        async def audit_dates() -> None:
+            if not any(data.get(key) for key in DATE_FIELDS):
+                return
+            issues = import_date_issues(data) or [
+                "Подтвердите каждую дату точной цитатой из источника. "
+                "Проверьте назначение дедлайна и не добавляйте время, "
+                "которого нет в тексте."
+            ]
+            await report("Нейросеть перепроверяет даты по исходным материалам")
+            try:
+                reviewed = await self.llm.extract(
+                    "",
+                    "",
+                    None,
+                    tz,
+                    previous_pages=source_context(pages),
+                    current=data,
+                    selection=selection,
+                    review_issues=issues,
+                )
+            except UserError as exc:
+                warning("Не удалось перепроверить даты. " + exc.message)
+            else:
+                unconfirmed = any(
+                    data.get(key) is not None and reviewed.get(key) is None
+                    for key in DATE_FIELDS
+                    if key in reviewed
+                )
+                # Only audit date fields. A null retracts an unsupported date;
+                # unrelated facts and manually entered drafts are not rewritten.
+                data.update({key: reviewed[key] for key in DATE_FIELDS if key in reviewed})
+                data["dates_reviewed"] = True
+                if unconfirmed:
+                    warning("LLM не подтвердила часть дат по источникам. Уточните их вручную.")
+                if import_date_issues(data):
+                    warning(
+                        "После перепроверки даты всё ещё противоречат друг другу. "
+                        "Проверьте их вручную."
+                    )
+                await report("Перепроверка дат завершена")
 
         try:
             async with asyncio.timeout(IMPORT_TIMEOUT_SECONDS):
-                await report("Читаю страницу" if source else "Разбираю пост")
-                html, final_url = "", None
-                if source:
+                await report("Ищу положение и регламент на сайте" if source else "Разбираю пост")
+                pending = [source] if source else []
+                attempts = 0
+                while (
+                    pending
+                    and attempts < MAX_DISCOVERY_PAGES
+                    and len(documents) < MAX_REGULATION_DOCUMENTS
+                ):
+                    candidate = pending.pop(0)
+                    if candidate in visited:
+                        continue
+                    visited.add(candidate)
+                    attempts += 1
+                    await report("Ищу документ: " + candidate)
                     try:
-                        html, final_url = await read(source)
-                        await report("Данные со страницы найдены")
+                        html, final_url = await fetch_public_page(candidate)
                     except UserError as exc:
                         warning(exc.message)
-                if self.llm.is_configured(selection[0]):
-                    data["llm_provider"], data["llm_model"] = selection
-                    # One main page and at most three linked documents; no autonomous URL guesses.
-                    for index in range(MAX_IMPORT_DOCUMENTS):
-                        await report(
-                            "Нейросеть извлекает данные"
-                            if index == 0
-                            else "Нейросеть уточняет данные по документам"
+                        continue
+                    if final_url != candidate and final_url in visited:
+                        continue
+                    visited.add(final_url)
+                    context = page_context(html, final_url)
+                    recognized = recognized or bool(
+                        HACK_RE.search(
+                            context["text"] + " " + str(context["metadata"].get("og:title", ""))
                         )
-                        previous = [
-                            {
-                                "url": page["url"],
-                                "text": page["text"][:12000],
-                                "json_ld": page["json_ld"][:4000],
-                            }
-                            for page in pages[:-1]
-                        ]
-                        try:
-                            result = await self.llm.extract(
-                                text,
-                                html,
-                                final_url,
-                                tz,
-                                previous_pages=previous,
-                                current=data,
-                                selection=selection,
-                            )
-                        except UserError as exc:
-                            warning(exc.message)
-                            break
-                        follow = merge(result, llm=True)
-                        await report("Найдены новые данные")
-                        for candidate in follow:
-                            try:
-                                candidate = public_url(candidate)
-                            except UserError:
-                                continue
-                            if (
-                                candidate in discovered
-                                and candidate not in visited
-                                and candidate not in pending
-                            ):
-                                pending.append(candidate)
-                        if index == MAX_IMPORT_DOCUMENTS - 1:
-                            break
-                        html, final_url = "", None
-                        while pending and read_attempts < MAX_IMPORT_DOCUMENTS:
-                            candidate = pending.pop(0)
-                            if candidate in visited:
-                                continue
-                            await report("Читаю связанный документ: " + candidate)
-                            try:
-                                html, final_url = await read(candidate)
-                                await report("Данные из документа найдены")
-                                break
-                            except UserError:
-                                warning("Не удалось прочитать один из связанных документов.")
-                        if final_url is None:
-                            break
+                    )
+                    if is_regulation(html, final_url):
+                        pages.append(context)
+                        documents.append((html, final_url))
+                        data.setdefault("spec_url", final_url)
+                        merge(extract_page(html, final_url, tz))
+                        await report("Положение / регламент прочитан")
+                    links = regulation_links(context["links"])
+                    if links:
+                        data.setdefault("document_links", links[:3])
+                    # Search a linked document/viewer's download before unrelated document hubs.
+                    pending = [url for url in links if url not in visited] + pending
+                if not documents:
+                    warning(
+                        "Не удалось найти или прочитать положение / регламент хакатона. "
+                        "Пришлите прямую ссылку на документ через импорт "
+                        "или заполните поля вручную."
+                    )
+                elif self.llm.is_configured(selection[0]):
+                    data["llm_provider"], data["llm_model"] = selection
+                    await report("Нейросеть извлекает данные из положения / регламента")
+                    html, document_url = documents[0]
+                    try:
+                        result = await self.llm.extract(
+                            "",
+                            html,
+                            document_url,
+                            tz,
+                            previous_pages=source_context(pages[1:]),
+                            current=data,
+                            selection=selection,
+                        )
+                    except UserError as exc:
+                        warning(exc.message)
+                    else:
+                        merge(result, llm=True)
+                        await report("Данные из документов найдены")
+                        await audit_dates()
         except TimeoutError:
             warning("Обработка заняла две минуты и завершена. Уже найденные данные сохранены.")
         if not recognized:
@@ -308,5 +329,6 @@ class HackathonService:
             return None
         data["imported"] = True
         data["import_sources"] = [page["url"] for page in pages]
+        data["regulations_import"] = bool(documents)
         await self.require_access(chat_id, user_id)
         return await self.storage.workflow.new_session(user_id, chat_id, "preview", data)

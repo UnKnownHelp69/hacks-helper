@@ -632,6 +632,8 @@ async def test_auto_url_requires_author_confirmation_and_deduplicates(app, monke
     import json
 
     async def fetch(url):
+        if not url.endswith("/rules"):
+            return '<h1>Хакатон</h1><a href="/rules">Положение</a>', url
         event = {
             "@type": "Event",
             "name": "Хакатон из ссылки",
@@ -641,7 +643,12 @@ async def test_auto_url_requires_author_confirmation_and_deduplicates(app, monke
             "minTeamSize": 2,
             "maxTeamSize": 4,
         }
-        return '<script type="application/ld+json">' + json.dumps(event) + "</script>", url
+        return (
+            '<h1>Положение о проведении хакатона</h1><script type="application/ld+json">'
+            + json.dumps(event)
+            + "</script>",
+            url,
+        )
 
     monkeypatch.setattr("bot.services.hackathons.fetch_public_page", fetch)
     await send(app, "https://hack.example/event", ALICE)
@@ -792,7 +799,7 @@ async def test_import_progress_stays_personal_and_fills_fields_before_completion
         return (
             '<h1>Хакатон</h1><a href="/rules">Правила</a>'
             if url == root
-            else "<p>Правила хакатона</p>",
+            else "<h1>Положение о проведении хакатона</h1>",
             url,
         )
 
@@ -801,21 +808,24 @@ async def test_import_progress_stays_personal_and_fills_fields_before_completion
     rules_entered, rules_release = asyncio.Event(), asyncio.Event()
 
     async def extract(post, html, url, tz, **kwargs):
-        if url == root:
+        assert post == "" and url != root
+        if url == rules:
             main_entered.set()
             await main_release.wait()
             return {
                 "title": "Хакатон из LLM",
                 "is_hackathon": True,
                 "team_max": 5,
+                "team_min": 2,
                 "registration_end": "2026-12-01T20:59:00+00:00",
                 "start_at": "2026-12-05T07:00:00+00:00",
                 "end_at": "2026-12-07T15:00:00+00:00",
-                "follow_urls": [rules],
+                "follow_urls": [],
             }
+        assert kwargs["review_issues"]
         rules_entered.set()
         await rules_release.wait()
-        return {"team_min": 2, "follow_urls": []}
+        return {"registration_end": "2026-12-01T20:59:00+00:00"}
 
     monkeypatch.setattr(app["ctx"].hacks.llm, "extract", AsyncMock(side_effect=extract))
     job = asyncio.create_task(send(app, root, ALICE, chat_id))
@@ -829,7 +839,7 @@ async def test_import_progress_stays_personal_and_fills_fields_before_completion
         await asyncio.wait_for(rules_entered.wait(), timeout=1)
         partial = app["session"].messages[-1]
         assert "Максимум в команде:</b> 5" in partial.text
-        assert "Минимум в команде:</b> ищу" in partial.text
+        assert "Минимум в команде:</b> 2" in partial.text
         assert await app["storage"].hackathons.list(chat_id) == []
         rules_release.set()
         await job

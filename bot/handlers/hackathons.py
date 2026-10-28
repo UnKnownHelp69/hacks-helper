@@ -101,6 +101,8 @@ async def preview(
         lines.append("Данные дополнены LLM. Проверьте их перед публикацией.")
         if session.data.get("llm_model"):
             lines.append(f"Модель: {escape(session.data['llm_model'])}")
+    if session.data.get("dates_reviewed"):
+        lines.append("Нейросеть дополнительно перепроверила даты по источникам.")
     for key, label in FIELD_LABELS.items():
         value = session.data.get(key)
         if key == "spec_url" and session.data.get("spec_file_id"):
@@ -114,7 +116,14 @@ async def preview(
     checkpoints = session.data.get("checkpoints", [])
     lines.append(f"Чекпоинты: {len(checkpoints)}")
     if session.data.get("import_sources"):
-        lines.append(f"Изучено источников: {len(session.data['import_sources'])}")
+        label = "Положение / регламент" if session.data.get("regulations_import") else "Источники"
+        lines.append(f"📄 <b>{label}:</b>")
+        for index, url in enumerate(session.data["import_sources"][:3], 1):
+            lines.append(f'<a href="{escape(url, quote=True)}">Документ {index}</a>')
+    elif session.data.get("document_links"):
+        lines.append("📎 Найдены ссылки на документы, но прочитать их не удалось:")
+        for index, url in enumerate(session.data["document_links"][:3], 1):
+            lines.append(f'<a href="{escape(url, quote=True)}">Открыть документ {index}</a>')
     valid = True
     try:
         validate_hack(session.data)
@@ -175,7 +184,8 @@ async def prompt(
     await ctx.storage.workflow.save_session(session)
     if field == "import":
         text = (
-            "Пришлите ссылку на хакатон или текст поста. "
+            "Пришлите сайт хакатона или прямую ссылку на положение / регламент. "
+            "Бот найдёт документы и заполнит данные из них. "
             "Сначала вы проверите данные, затем подтвердите публикацию."
         )
     elif field == "checkpoint":

@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from html import escape
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -25,9 +25,21 @@ from bot.errors import UserError
 
 URL_RE = re.compile(r"https?://[^\s<>\"\[\]]+", re.IGNORECASE)
 HACK_RE = re.compile(r"хакатон|hackathon", re.IGNORECASE)
+MAX_HTML_BYTES = 2_000_000
+MAX_PDF_BYTES = 1_000_000
+RULES_LINK_RE = re.compile(r"положени|регламент|правила|regulation|rules|polozhen|reglament", re.I)
+UNRELATED_DOC_RE = re.compile(
+    r"политик|персональн|согласи|конфиденц|privacy|consent|personal.?data", re.I
+)
+RULES_BODY_RE = re.compile(
+    r"настоящ\w*\s+(?:положени\w*|регламент\w*|правил\w*)|общие\s+положения|"
+    r"положени[ея]\s+о\s+(?:проведении|хакатон)|регламент\s+(?:проведения|участия)|"
+    r"official\s+rules|rules\s+and\s+regulations|terms\s+of\s+participation",
+    re.I,
+)
 DATE_RE = re.compile(
     r"(?P<day>\d{1,2})[./](?P<month>\d{1,2})[./](?P<year>20\d{2})"
-    r"(?:\s*(?:в|,)?\s*(?P<hour>\d{1,2}):(?P<minute>\d{2}))?"
+    r"(?:\s*(?:в|,)?\s*(?P<hour>\d{1,2})[.:](?P<minute>\d{2}))?"
 )
 MONTHS = {
     "января": 1,
@@ -45,13 +57,14 @@ MONTHS = {
 }
 WORD_DATE_RE = re.compile(
     r"(?P<day>\d{1,2})\s+(?P<month>" + "|".join(MONTHS) + r")(?:\s+(?P<year>20\d{2}))?"
-    r"(?:\s*(?:в|,)?\s*(?P<hour>\d{1,2}):(?P<minute>\d{2}))?",
+    r"(?:\s*(?:в|,)?\s*(?P<hour>\d{1,2})[.:](?P<minute>\d{2}))?",
     re.IGNORECASE,
 )
 RANGE_RE = re.compile(
-    r"(?P<first>\d{1,2})\s*(?:(?P<first_month>"
+    r"(?<!\d)(?P<first>\d{1,2})\s*(?:(?P<first_month>"
     + "|".join(MONTHS)
-    + r")\s*)?(?:[-–—]|по)\s*(?P<last>\d{1,2})\s+(?P<month>"
+    + r")\s*(?:(?P<first_year>20\d{2})(?:\s*года?)?\s*)?)?"
+    r"(?:[-–—]|по)\s*(?P<last>\d{1,2})(?!\d)\s+(?P<month>"
     + "|".join(MONTHS)
     + r")\s+(?P<year>20\d{2})",
     re.IGNORECASE,
@@ -108,7 +121,7 @@ class PublicResolver(AbstractResolver):
 
 
 async def fetch_public_page(url: str) -> tuple[str, str]:
-    """Read at most 1 MB, validating every redirect and resolved destination."""
+    """Bound HTML to 2 MB and PDF to 1 MB; validate every redirect and destination."""
     current = public_url(url)
     resolver = PublicResolver()
     try:
@@ -142,9 +155,14 @@ async def fetch_public_page(url: str) -> tuple[str, str]:
                     }:
                         raise UserError("По ссылке нужна веб-страница с описанием хакатона")
                     data = bytearray()
+                    limit = (
+                        MAX_PDF_BYTES
+                        if response.content_type == "application/pdf"
+                        else MAX_HTML_BYTES
+                    )
                     async for chunk in response.content.iter_chunked(16384):
                         data.extend(chunk)
-                        if len(data) > 1_000_000:
+                        if len(data) > limit:
                             raise UserError("Страница слишком большая; заполните данные вручную")
                     if response.content_type == "application/pdf":
                         return "<pre>" + escape(await pdf_text(bytes(data))) + "</pre>", current
@@ -187,15 +205,24 @@ class PageParser(HTMLParser):
         self.metadata: dict[str, str] = {}
         self.structured: list[Any] = []
         self.links: list[dict[str, str]] = []
-        self._anchor: tuple[str, int] | None = None
+        self.headings: list[str] = []
+        self._heading: int | None = None
+        self._anchor: tuple[str, int, str] | None = None
         self._hidden = 0
         self._json = False
         self._script: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = dict(attrs)
+        if tag in {"h1", "h2", "h3"} and not self._hidden:
+            self._heading = len(self.text)
         if tag == "a" and values.get("href") and not self._hidden:
-            self._anchor = (values["href"], len(self.text))
+            hint = values.get("aria-label") or values.get("title") or ""
+            self._anchor = (values["href"], len(self.text), hint)
+        if tag in {"iframe", "embed", "object"} and not self._hidden:
+            target = values.get("src") or values.get("data") or ""
+            if re.search(r"\.pdf(?:[?#]|$)", target, re.I):
+                self.links.append({"url": target, "label": values.get("title") or "PDF"})
         if tag in {"script", "style", "noscript"}:
             self._hidden += 1
             self._json = tag == "script" and values.get("type") == "application/ld+json"
@@ -208,9 +235,13 @@ class PageParser(HTMLParser):
             self.text.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in {"h1", "h2", "h3"} and self._heading is not None:
+            self.headings.append("".join(self.text[self._heading :]).strip()[:200])
+            self._heading = None
         if tag == "a" and self._anchor:
-            href, start = self._anchor
-            self.links.append({"url": href, "label": "".join(self.text[start:]).strip()[:200]})
+            href, start, hint = self._anchor
+            label = "".join(self.text[start:]).strip() or hint
+            self.links.append({"url": href, "label": label[:200]})
             self._anchor = None
         if tag in {"script", "style", "noscript"}:
             if self._json:
@@ -226,6 +257,42 @@ class PageParser(HTMLParser):
             self._script.append(data)
         elif not self._hidden:
             self.text.append(data)
+
+
+def regulation_links(links: list[dict[str, str]]) -> list[str]:
+    """Prefer actual rules links, then document hubs and public viewer downloads."""
+    ranked = []
+    for index, link in enumerate(links):
+        description = unquote(link["label"] + " " + link["url"])
+        if UNRELATED_DOC_RE.search(description):
+            continue
+        if RULES_LINK_RE.search(description):
+            rank = 0
+        elif re.search(r"\.pdf(?:[?#]|$)|скачать|download|приложени|appendix", description, re.I):
+            rank = 1
+        elif re.search(r"документ|documents|материалы|materials", description, re.I):
+            rank = 2
+        else:
+            continue
+        ranked.append((rank, index, link["url"]))
+    return list(dict.fromkeys(url for _, _, url in sorted(ranked)))
+
+
+def is_regulation(html: str, url: str) -> bool:
+    """Do not confuse a landing-page link or a file viewer with the rules themselves."""
+    parser = PageParser()
+    parser.feed(html)
+    text = " ".join("".join(parser.text).split())
+    if not HACK_RE.search(text):
+        return False
+    pdf = html.lstrip().startswith("<pre>")
+    heading = parser.headings[0] if parser.headings else text[:200]
+    if UNRELATED_DOC_RE.search(heading) or UNRELATED_DOC_RE.search(unquote(urlsplit(url).path)):
+        return False
+    document = (
+        pdf or RULES_LINK_RE.search(heading) or RULES_LINK_RE.search(unquote(urlsplit(url).path))
+    )
+    return bool(document and (RULES_BODY_RE.search(text) or (pdf and RULES_LINK_RE.search(text))))
 
 
 def _iso(raw: Any, tz: ZoneInfo) -> str | None:
@@ -245,7 +312,9 @@ def _line_dates(
         try:
             month = MONTHS[match["month"].lower()]
             first_month = MONTHS[(match["first_month"] or match["month"]).lower()]
-            first_year = int(match["year"]) - int(first_month > month)
+            first_year = int(match["first_year"] or match["year"]) - int(
+                not match["first_year"] and first_month > month
+            )
             first = datetime(first_year, first_month, int(match["first"]), tzinfo=tz)
             last = datetime(int(match["year"]), month, int(match["last"]), 23, 59, tzinfo=tz)
             return [first.astimezone(UTC).isoformat(), last.astimezone(UTC).isoformat()]
@@ -274,6 +343,47 @@ def _line_dates(
     return [value for _, value in sorted(values)]
 
 
+def grounded_date(value: str, quote: str, source: str, field: str, tz: ZoneInfo) -> str | None:
+    """A model date needs an exact source quote and a matching calendar date/time."""
+
+    def compact(text: str) -> str:
+        text = text.casefold().replace("–", "-").replace("—", "-")
+        return " ".join(re.findall(r"\d+|[^\W\d_]+|[^\w\s]", text))
+
+    if f" {compact(quote)} " not in f" {compact(source)} ":
+        return None
+    # PDF line layout can join Cyrillic month names directly to dates/years.
+    separate = r"(?<=[А-Яа-яЁё])(?=\d)|(?<=\d)(?=[А-Яа-яЁё])"
+    quote = re.sub(separate, " ", quote)
+    source = re.sub(separate, " ", source)
+    years = set()
+    for pattern in (DATE_RE, WORD_DATE_RE, RANGE_RE):
+        years.update(int(match["year"]) for match in pattern.finditer(source) if match["year"])
+    # Explicit ISO dates are also valid evidence, including JSON-LD timestamps.
+    iso_pattern = r"\b20\d{2}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)?"
+    years.update(int(match[:4]) for match in re.findall(iso_pattern, source))
+    year = next(iter(years)) if len(years) == 1 else None
+    end_of_day = field != "start_at"
+    candidates = _line_dates(quote, tz, end_of_day=end_of_day, year=year)
+    if RANGE_RE.search(quote) and candidates:
+        candidates = [candidates[0] if field == "start_at" else candidates[-1]]
+    for raw in re.findall(iso_pattern, quote):
+        if "T" not in raw and end_of_day:
+            raw += "T23:59:00"
+        if parsed := _iso(raw, tz):
+            candidates.append(parsed)
+    target = datetime.fromisoformat(value).astimezone(tz)
+    for candidate in candidates:
+        parsed = datetime.fromisoformat(candidate).astimezone(tz)
+        if parsed == target:
+            return candidate
+        explicit_time = re.search(r"(?<![\d.])\d{1,2}[.:]\d{2}(?![.\d])|\d+\s*час", quote)
+        if parsed.date() == target.date() and not explicit_time:
+            # A date-only source supports the documented default time, not a model-invented hour.
+            return candidate
+    return None
+
+
 def extract_post(text: str, tz: ZoneInfo) -> dict[str, Any]:
     """Only copy dates and limits actually present; missing fields stay editable and empty."""
     lines = [line.strip() for line in text[:20000].splitlines() if line.strip()]
@@ -283,7 +393,10 @@ def extract_post(text: str, tz: ZoneInfo) -> dict[str, Any]:
     for match in RANGE_RE.finditer(text[:20000]):
         year = int(match["year"])
         first_month = MONTHS[(match["first_month"] or match["month"]).lower()]
-        years.update({year, year - int(first_month > MONTHS[match["month"].lower()])})
+        first_year = int(match["first_year"] or year) - int(
+            not match["first_year"] and first_month > MONTHS[match["month"].lower()]
+        )
+        years.update({year, first_year})
     event_year = next(iter(years)) if len(years) == 1 else None
     result: dict[str, Any] = {"checkpoints": []}
     title = next(

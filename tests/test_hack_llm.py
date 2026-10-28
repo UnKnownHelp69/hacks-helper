@@ -316,3 +316,84 @@ async def test_compatible_api_does_not_receive_openrouter_specific_options():
         assert llm.model == "default/model"
     finally:
         await llm.close()
+
+
+async def test_audit_receives_issues_and_preserves_null_to_retract_uncertain_date():
+    def handler(request):
+        context = json.loads(json.loads(request.content)["messages"][1]["content"])
+        assert context["review_issues"] == ["Registration deadline is after event start"]
+        assert context["current"]["registration_end"] == "2026-11-06T20:59:00+00:00"
+        return httpx.Response(200, json=response(fields(registration_end=None, date_evidence=[])))
+
+    llm = client(handler)
+    try:
+        result = await llm.extract(
+            "post",
+            "",
+            None,
+            TZ,
+            current={"registration_end": "2026-11-06T20:59:00+00:00"},
+            review_issues=["Registration deadline is after event start"],
+        )
+        assert "registration_end" in result and result["registration_end"] is None
+    finally:
+        await llm.close()
+
+
+@pytest.mark.parametrize("source_url", ["https://event.example/", "https://invented.example/"])
+async def test_audit_independently_checks_quotes_and_removes_unsupported_time(source_url):
+    def handler(request):
+        body = json.loads(request.content)
+        assert "date_evidence" in body["response_format"]["json_schema"]["schema"]["required"]
+        return httpx.Response(
+            200,
+            json=response(
+                fields(
+                    registration_end="2026-10-19T20:59:00+00:00",
+                    start_at="2026-11-13T07:00:00+00:00",
+                    end_at="2026-11-16T20:59:00+00:00",
+                    date_evidence=[
+                        {
+                            "field": "registration_end",
+                            "quote": "Регистрация закрыта",
+                            "source_url": source_url,
+                        },
+                        {
+                            "field": "start_at",
+                            "quote": "13 — 16 ноября 2026",
+                            "source_url": source_url,
+                        },
+                        {
+                            "field": "end_at",
+                            "quote": "13 — 16 ноября 2026",
+                            "source_url": source_url,
+                        },
+                    ],
+                )
+            ),
+        )
+
+    llm = client(handler)
+    try:
+        result = await llm.extract(
+            "https://event.example/",
+            "",
+            None,
+            TZ,
+            previous_pages=[
+                {
+                    "url": "https://event.example/",
+                    "text": "Регистрация закрыта. 13 — 16 ноября 2026",
+                }
+            ],
+            review_issues=["Проверить даты"],
+        )
+        assert result["registration_end"] is None
+        assert "date_evidence" not in result
+        if source_url == "https://event.example/":
+            assert result["start_at"] == "2026-11-12T21:00:00+00:00"
+            assert result["end_at"] == "2026-11-16T20:59:00+00:00"
+        else:
+            assert result["start_at"] is None and result["end_at"] is None
+    finally:
+        await llm.close()

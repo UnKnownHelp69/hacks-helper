@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs, urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from bot.errors import UserError
 from bot.services.gigachat import GigaChatClient
 from bot.services.github import normalize_repo
-from bot.services.hack_import import PageParser, public_url
+from bot.services.hack_import import PageParser, grounded_date, public_url
 from bot.services.llm_http import bounded_json
 
 log = logging.getLogger(__name__)
@@ -97,6 +97,17 @@ class Extraction(BaseModel):
         return value
 
 
+class DateEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    field: Literal["registration_end", "start_at", "end_at"]
+    source_url: str | None
+    quote: str = Field(min_length=10, max_length=1200)
+
+
+class DateReview(Extraction):
+    date_evidence: list[DateEvidence] = Field(max_length=3)
+
+
 def page_context(html: str, url: str) -> dict[str, Any]:
     parser = PageParser()
     parser.feed(html)
@@ -138,18 +149,29 @@ Dates must be ISO 8601 with timezone; use the supplied chat timezone when omitte
 If a date has no time, use 00:00 for start/checkpoints and 23:59 for deadlines/end.
 Use a year only when explicitly stated or unambiguously established elsewhere in the source.
 registration_end is the participant registration deadline, not the solution submission deadline.
+Do not mistake deadlines for customers submitting tasks or challenge proposals for participant
+registration. current is an unverified draft, NEVER source evidence. When review_issues is
+nonempty, re-read post/page/previous_pages to audit the dates. registration_end must be no later
+than start_at, and start_at before end_at. Check event stages, years, date-only times and timezones.
+Only correct a date when the supplied sources support the correction. If a date cannot be
+confirmed or sources contradict each other, return null for that uncertain field. Never move
+or swap dates merely to satisfy chronological order; never use today's date for unknown deadlines.
+When the schema includes date_evidence, provide one EXACT quote per non-null date. Include the
+date and surrounding words that identify its purpose. Copy whitespace/punctuation faithfully.
+source_url must be an actual page/previous_pages URL, or null for a quote from the original post.
+Quotes MUST come from those sources, NEVER from current. Return null when there is no quote.
+Do not infer specific hours from a date-only source: use start 00:00 and deadline/end 23:59
+in the supplied chat timezone.
 team_min/team_max are people per team; a maximum alone does not establish the minimum.
 repo is the participants' solution GitHub repository (owner/name), not an organizer's example.
 org_chat_url must be an explicitly identified hackathon group/channel for participants or
 organizer contact. A registration bot or the company's general social page is not this chat.
 Copy actual links, resolving relative links against the page URL. spec_url is rules/task brief.
 Extract named checkpoints, presentations and submission deadlines with known dates (up to 20).
-The page and previous_pages describe the same hackathon. Consolidate facts with current data;
-prefer detailed event rules over general landing-page wording when they clarify missing fields.
-follow_urls: choose up to 3 EXACT URLs from supplied page links that should be read next to fill
-missing or uncertain facts, especially event rules (including PDF), FAQ, schedule or registration.
-Do not select pages already in previous_pages, the current page, privacy/consent documents,
-social feeds, login pages or unrelated events. Return [] when further reading is unnecessary.
+The page and previous_pages are the hackathon's regulations/rules, not landing-page references.
+Extract official dates and team requirements from these documents. If multiple documents conflict,
+leave uncertain fields null for author review. Do not invent information that is missing from rules.
+Document discovery is already complete; always return follow_urls: [].
 Keep titles concise, in the source language. Do not include commentary outside the JSON."""
 
 
@@ -325,6 +347,7 @@ class HackathonLLM:
         previous_pages: list[dict[str, Any]] | None = None,
         current: dict[str, Any] | None = None,
         selection: tuple[str, str] | None = None,
+        review_issues: list[str] | None = None,
     ) -> dict[str, Any]:
         provider, model = selection or self.default_selection
         if not self.is_configured(provider):
@@ -344,9 +367,11 @@ class HackathonLLM:
                 for key, value in (current or {}).items()
                 if key in Extraction.model_fields and key not in {"is_hackathon", "follow_urls"}
             },
+            "review_issues": review_issues or [],
         }
         try:
             async with self._slots, asyncio.timeout(120):
+                schema = DateReview if review_issues else Extraction
                 messages = [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
@@ -364,7 +389,7 @@ class HackathonLLM:
                                 {
                                     "name": "extract_hackathon",
                                     "description": "Return the extracted hackathon facts",
-                                    "parameters": Extraction.model_json_schema(),
+                                    "parameters": schema.model_json_schema(),
                                 }
                             ],
                         },
@@ -377,7 +402,7 @@ class HackathonLLM:
                     ):
                         raise ValueError("Incomplete function response")
                     arguments = call["arguments"]
-                    result = Extraction.model_validate_json(
+                    result = schema.model_validate_json(
                         arguments if isinstance(arguments, str) else json.dumps(arguments)
                     )
                 else:
@@ -390,7 +415,7 @@ class HackathonLLM:
                             "json_schema": {
                                 "name": "hackathon",
                                 "strict": True,
-                                "schema": Extraction.model_json_schema(),
+                                "schema": schema.model_json_schema(),
                             },
                         },
                         "max_tokens": 8000,
@@ -403,8 +428,33 @@ class HackathonLLM:
                     choice = payload["choices"][0]
                     if choice["finish_reason"] != "stop":
                         raise ValueError("Incomplete response")
-                    result = Extraction.model_validate_json(choice["message"]["content"])
-                return result.model_dump(exclude_none=True)
+                    result = schema.model_validate_json(choice["message"]["content"])
+                if isinstance(result, DateReview):
+                    sources = {None: context["post"]}
+                    for page in [context["page"], *context["previous_pages"]]:
+                        if page is not None:
+                            sources[page["url"]] = "\n".join(
+                                [
+                                    page.get("text", ""),
+                                    page.get("json_ld", ""),
+                                    *page.get("metadata", {}).values(),
+                                ]
+                            )
+                    for field in ("registration_end", "start_at", "end_at"):
+                        value = getattr(result, field)
+                        evidence = next(
+                            (item for item in result.date_evidence if item.field == field), None
+                        )
+                        verified = None
+                        if value and evidence and evidence.source_url in sources:
+                            verified = grounded_date(
+                                value, evidence.quote, sources[evidence.source_url], field, tz
+                            )
+                        setattr(result, field, verified)
+                # An audit must be able to retract an unconfirmed date instead of retaining it.
+                return result.model_dump(
+                    exclude_none=not bool(review_issues), exclude={"date_evidence"}
+                )
         except (httpx.TimeoutException, TimeoutError):
             log.warning("Hackathon LLM timed out (provider=%s, model=%s)", provider, model)
             raise UserError(

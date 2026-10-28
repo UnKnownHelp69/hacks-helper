@@ -10,7 +10,7 @@ from bot.db.database import to_db, utcnow
 from bot.errors import UserError
 from bot.services.github import normalize_repo
 from bot.services.hack_import import public_url
-from bot.services.schedule_logic import validate_dates
+from bot.services.schedule_logic import date_order_errors, validate_dates
 from bot.services.timeutil import parse_datetime_tokens
 
 FIELD_LABELS = {
@@ -69,6 +69,15 @@ def _aware(raw: Any) -> datetime:
     if value.tzinfo is None:
         raise UserError("У даты должен быть часовой пояс")
     return value
+
+
+def import_date_issues(data: dict[str, Any]) -> list[str]:
+    """Check known dates even in incomplete drafts, using the publication invariants."""
+    try:
+        dates = {key: _aware(data[key]) if data.get(key) else None for key in DATE_FIELDS}
+        return date_order_errors(dates["registration_end"], dates["start_at"], dates["end_at"])
+    except UserError as exc:
+        return [exc.message]
 
 
 def validate_hack(data: dict[str, Any]) -> dict[str, Any]:

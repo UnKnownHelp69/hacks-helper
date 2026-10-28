@@ -49,11 +49,20 @@ def parse_milestone(raw: str) -> str:
         ) from None
 
 
+def date_order_errors(
+    registration_end: datetime | None, start_at: datetime | None, end_at: datetime | None
+) -> list[str]:
+    errors = []
+    if registration_end is not None and start_at is not None and registration_end > start_at:
+        errors.append("Окончание регистрации должно быть не позже начала хакатона")
+    if start_at is not None and end_at is not None and start_at >= end_at:
+        errors.append("Начало хакатона должно быть раньше его окончания")
+    return errors
+
+
 def validate_dates(registration_end: datetime, start_at: datetime, end_at: datetime) -> None:
-    if registration_end > start_at:
-        raise UserError("Окончание регистрации должно быть не позже начала хакатона")
-    if start_at >= end_at:
-        raise UserError("Начало хакатона должно быть раньше его окончания")
+    if errors := date_order_errors(registration_end, start_at, end_at):
+        raise UserError(errors[0])
 
 
 @dataclass(frozen=True)
