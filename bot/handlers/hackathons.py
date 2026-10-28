@@ -199,30 +199,22 @@ async def show_hack(event: Event, ctx: AppContext, session: HackSession, notice:
     hack = await ctx.hacks.hackathon(int(session.data["hack_id"]), session.user_id)
     text, _ = await ctx.hack_notifications.card(hack)
     checkpoints = await ctx.storage.workflow.checkpoints(hack.id)
-    rows = []
-    if hack.is_active and hack.end_at > utcnow():
-        participating = session.user_id in await ctx.storage.hackathons.members(hack.id)
-        rows.append(
-            [
-                button(
-                    session,
-                    "❌ Нет" if participating else "✅ Участвую",
-                    "vote",
-                    "no" if participating else "yes",
-                ),
-            ]
-        )
+    rows = [[button(session, "В меню", "menu")]]
+    active = hack.is_active and hack.end_at > utcnow()
+    participating = session.user_id in await ctx.storage.hackathons.members(hack.id)
+    if active and not participating:
+        rows.append([button(session, "✅ Участвую", "vote", "yes")])
     details = [button(session, "👥 Команды", "teams", 0)]
     if checkpoints:
         details.append(button(session, "📍 Чекпоинты", "checkpoints"))
     rows.append(details)
     if hack.spec_file_id:
         rows.append([button(session, "📄 Получить ТЗ", "spec")])
-    navigation = []
-    if hack.is_active and hack.end_at > utcnow():
-        navigation.append(button(session, "✏️ Редактировать", "edit"))
-    navigation.append(button(session, "В меню", "menu"))
-    rows.append(navigation)
+    if active:
+        footer = [button(session, "✏️ Редактировать", "edit")]
+        if participating:
+            footer.append(button(session, "Отмена регистрации", "vote", "no"))
+        rows.append(footer)
     if notice:
         text = notice + "\n\n" + text
     await personal_reply(event, text, reply_markup=keyboard(rows))
@@ -238,7 +230,7 @@ async def show_teams(event: Event, ctx: AppContext, session: HackSession, page: 
         f"Минимум: {hack.team_min}, максимум: {hack.team_max}",
     ]
     lines.append(f"Моя команда: {escape(mine.name) if mine else 'не выбрана'}")
-    rows = []
+    rows = [[button(session, "В меню", "menu")]]
     can_join = (
         mine is None
         and session.user_id in votes["yes"]
@@ -295,7 +287,7 @@ async def show_teams(event: Event, ctx: AppContext, session: HackSession, page: 
         rows.append([button(session, "➕ Новая команда", "newteam")])
     elif hack.is_active and hack.end_at > utcnow() and session.user_id not in votes["yes"]:
         rows.append([button(session, "✅ Участвую", "vote", "yes")])
-    rows.append([button(session, "К карточке", "card"), button(session, "В меню", "menu")])
+    rows.append([button(session, "К карточке", "card")])
     await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows))
 
 
@@ -437,7 +429,7 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
             await edit_menu(callback, ctx, session)
         elif action == "vote":
             if argument not in {"yes", "no"}:
-                raise UserError("Выберите «Участвую» или «Нет»")
+                raise UserError("Выберите «Участвую» или «Отмена регистрации»")
             result = await ctx.hacks.vote(int(session.data["hack_id"]), session.user_id, argument)
             if argument == "yes" and result is None:
                 await show_teams(callback, ctx, session)
@@ -521,6 +513,11 @@ async def public_hack_action(callback: CallbackQuery, ctx: AppContext) -> None:
     if callback.message is None or callback.message.chat.id != hack.chat_id:
         raise UserError("Хакатон относится к другому чату")
     await callback.answer()
+    if parts[0] == "hm" and len(parts) == 3:
+        if parts[2] != "menu":
+            raise UserError("Кнопка недоступна")
+        await menu(callback, ctx)
+        return
     session = await ctx.storage.workflow.new_session(
         callback.from_user.id, hack.chat_id, "view", {"hack_id": hack.id}
     )

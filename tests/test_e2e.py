@@ -1155,16 +1155,26 @@ async def test_participation_button_matches_membership_in_personal_and_shared_ca
     if choice is not None:
         await app["storage"].workflow.vote(hack.id, USER_ID, choice)
     await send(app, f"/hack {hack.slug}", ALICE, chat_id)
-    expected = "❌ Нет" if choice == "yes" else "✅ Участвую"
+    expected = "Отмена регистрации" if choice == "yes" else "✅ Участвую"
     buttons = private_panel(app, chat_id=chat_id).reply_markup.inline_keyboard
-    assert [b.text for row in buttons for b in row if b.text in {"❌ Нет", "✅ Участвую"}] == [
-        expected
-    ]
+    assert [b.text for b in buttons[0]] == ["В меню"]
+    if choice == "yes":
+        assert buttons[-1][-1].text == expected and len(buttons[-1]) == 2
+    assert [
+        b.text for row in buttons for b in row if b.text in {"Отмена регистрации", "✅ Участвую"}
+    ] == [expected]
     _, markup = await app["ctx"].hack_notifications.card(hack)
     assert [
         b.text for row in markup.inline_keyboard for b in row if b.callback_data.startswith("hv:")
     ] == ([expected] if chat_id > 0 else [])
     assert any(b.callback_data == f"hm:{hack.id}" for row in markup.inline_keyboard for b in row)
+    if chat_id > 0:
+        assert [b.text for b in markup.inline_keyboard[0]] == ["В меню"]
+        if choice == "yes":
+            assert markup.inline_keyboard[-1][-1].text == expected
+            assert len(markup.inline_keyboard[-1]) == 2
+        await press(app, markup.inline_keyboard[0][0].callback_data, ALICE, chat_id)
+        assert "Хакатоны" in private_panel(app, chat_id=chat_id).text
 
 
 @pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
@@ -1178,17 +1188,22 @@ async def test_participation_buttons_switch_in_place_after_joining_and_leaving(a
     await send(app, f"/hack {hack.slug}", ALICE, chat_id)
     initial = private_panel(app, chat_id=chat_id)
     panel_id = initial.ephemeral_message_id if chat_id < 0 else initial.message_id
-    for label, participating in (("Участвую", True), ("Нет", False), ("Участвую", True)):
+    for label, participating in (
+        ("Участвую", True),
+        ("Отмена регистрации", False),
+        ("Участвую", True),
+    ):
         await click(app, label, chat_id=chat_id)
         current = private_panel(app, chat_id=chat_id)
+        assert [b.text for b in current.reply_markup.inline_keyboard[0]] == ["В меню"]
         assert (current.ephemeral_message_id if chat_id < 0 else current.message_id) == panel_id
         assert (USER_ID in await app["storage"].hackathons.members(hack.id)) == participating
         assert [
             b.text
             for row in current.reply_markup.inline_keyboard
             for b in row
-            if b.text in {"❌ Нет", "✅ Участвую"}
-        ] == (["❌ Нет"] if participating else ["✅ Участвую"])
+            if b.text in {"Отмена регистрации", "✅ Участвую"}
+        ] == (["Отмена регистрации"] if participating else ["✅ Участвую"])
 
 
 async def test_team_page_does_not_offer_join_again_after_registration_closes(app):
@@ -1235,8 +1250,8 @@ async def test_team_list_shows_all_rosters_with_telegram_aliases_in_place(app, c
         assert label in panel.text
     assert '<a href="tg://user?id=3003">Без &lt;алиаса&gt;</a>' in panel.text
     assert [b.text for row in panel.reply_markup.inline_keyboard for b in row] == [
-        "К карточке",
         "В меню",
+        "К карточке",
     ]
 
 

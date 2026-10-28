@@ -70,22 +70,28 @@ class HackNotifications:
             lines.append(" · ".join(materials))
         checkpoints = await self.storage.workflow.checkpoints(hack.id)
         rows = []
+        footer = [InlineKeyboardButton(text="Открыть", callback_data=f"hm:{hack.id}")]
+        if hack.chat_id > 0:
+            rows.append([InlineKeyboardButton(text="В меню", callback_data=f"hm:{hack.id}:menu")])
         if hack.is_active and hack.chat_id > 0:
             participating = hack.chat_id in members
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text="❌ Нет" if participating else "✅ Участвую",
-                        callback_data=f"hv:{hack.id}:{'no' if participating else 'yes'}",
-                    ),
-                ]
+            action = InlineKeyboardButton(
+                text="Отмена регистрации" if participating else "✅ Участвую",
+                callback_data=f"hv:{hack.id}:{'no' if participating else 'yes'}",
             )
+            if participating:
+                footer.append(action)
+            else:
+                rows.append([action])
         elif not hack.is_active:
             lines.append("🏁 Хакатон завершён")
-        details = [InlineKeyboardButton(text="Открыть", callback_data=f"hm:{hack.id}")]
         if checkpoints:
-            details.append(InlineKeyboardButton(text="📍 Чекпоинты", callback_data=f"hc:{hack.id}"))
-        rows.append(details)
+            checkpoint = InlineKeyboardButton(text="📍 Чекпоинты", callback_data=f"hc:{hack.id}")
+            if hack.chat_id > 0:
+                rows.append([checkpoint])
+            else:
+                footer.append(checkpoint)
+        rows.append(footer)
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def flush(self) -> None:
