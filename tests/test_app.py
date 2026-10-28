@@ -106,5 +106,22 @@ def test_tokens_are_redacted_from_logs():
 
     fake_tg = "1234567890:" + "A" * 35
     fake_gh = "github_pat_" + "B" * 40
-    text = redact(f"url=https://api.telegram.org/bot{fake_tg}/getMe token={fake_gh}")
-    assert fake_tg not in text and fake_gh not in text
+    fake_llm = "sk-or-v1-" + "C" * 64
+    text = redact(f"url=https://api.telegram.org/bot{fake_tg}/getMe {fake_gh} {fake_llm}")
+    assert all(token not in text for token in (fake_tg, fake_gh, fake_llm))
+
+
+def test_llm_settings(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOT_TOKEN", "test")
+    monkeypatch.setenv("LLM_API_KEY", "test-secret")
+    monkeypatch.setenv("LLM_MODEL", "openrouter/free")
+    monkeypatch.setenv("LLM_BASE_URL", "https://openrouter.ai/api/v1/")
+    settings = load_settings(tmp_path / "missing.env")
+    assert settings.llm_api_key == "test-secret"
+    assert "test-secret" not in repr(settings)
+    assert settings.llm_model == "openrouter/free"
+    assert settings.llm_base_url == "https://openrouter.ai/api/v1"
+    for url in ("http://example.com", "https://user:pass@example.com", "https://example.com?q=x"):
+        monkeypatch.setenv("LLM_BASE_URL", url)
+        with pytest.raises(ConfigError, match="LLM_BASE_URL"):
+            load_settings(tmp_path / "missing.env")

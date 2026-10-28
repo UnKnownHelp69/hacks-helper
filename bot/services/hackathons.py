@@ -20,18 +20,30 @@ from bot.services.hack_import import (
     fetch_public_page,
     public_url,
 )
+from bot.services.hack_llm import HackathonLLM
 from bot.services.reminders import chat_zone
 from bot.services.users import UserDirectory
 
 
 class HackathonService:
     def __init__(
-        self, settings: Settings, storage: Storage, directory: UserDirectory, github: GitHubClient
+        self,
+        settings: Settings,
+        storage: Storage,
+        directory: UserDirectory,
+        github: GitHubClient,
+        llm: HackathonLLM | None = None,
     ) -> None:
         self.settings = settings
         self.storage = storage
         self.directory = directory
         self.github = github
+        self.llm = llm or HackathonLLM(
+            settings.llm_api_key, settings.llm_model, settings.llm_base_url
+        )
+
+    async def close(self) -> None:
+        await self.llm.close()
 
     async def require_access(self, chat_id: int, user_id: int) -> None:
         if not self.settings.is_chat_allowed(chat_id):
@@ -107,6 +119,8 @@ class HackathonService:
         await self.require_access(chat_id, user_id)
         tz = await chat_zone(self.storage, chat_id, self.settings.default_timezone)
         data = extract_post(text, tz)
+        post_data = dict(data)
+        html, final_url = "", None
         source = data.get("site_url")
         if source is None:
             source = next(
@@ -129,12 +143,13 @@ class HackathonService:
             )
             if title:
                 data["title"] = title[:100]
+                post_data["title"] = data["title"]
         if source:
             try:
                 source = public_url(source)
                 html, final_url = await fetch_public_page(source)
                 page = extract_page(html, final_url, tz)
-                recognized = recognized or page.pop("is_hackathon", False)
+                recognized = page.pop("is_hackathon", False) or recognized
                 # Explicit labels in the shared post override a site's generic metadata.
                 checkpoints = data.get("checkpoints") or page.get("checkpoints", [])
                 data = {
@@ -146,6 +161,24 @@ class HackathonService:
                 data["import_error"] = exc.message
             if source:
                 data["source_key"] = "url:" + hashlib.sha256(source.encode()).hexdigest()
+        if self.llm.configured:
+            try:
+                extracted = await self.llm.extract(text, html, final_url, tz)
+                recognized = extracted.pop("is_hackathon", False) or recognized
+                checkpoints = (
+                    post_data.get("checkpoints")
+                    or extracted.pop("checkpoints", [])
+                    or data.get("checkpoints", [])
+                )
+                data.update(extracted)
+                # Explicit post values win, null/empty model results never erase parsed facts.
+                data.update({key: value for key, value in post_data.items() if value})
+                data["checkpoints"] = checkpoints
+                data["llm_imported"] = True
+            except UserError as exc:
+                data["import_error"] = " ".join(
+                    filter(None, [data.get("import_error"), exc.message])
+                )
         if not recognized:
             return None
         data.setdefault("source_key", "post:" + hashlib.sha256(text.strip().encode()).hexdigest())

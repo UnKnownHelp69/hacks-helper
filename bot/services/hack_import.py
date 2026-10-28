@@ -154,12 +154,16 @@ class PageParser(HTMLParser):
         self.text: list[str] = []
         self.metadata: dict[str, str] = {}
         self.structured: list[Any] = []
+        self.links: list[dict[str, str]] = []
+        self._anchor: tuple[str, int] | None = None
         self._hidden = 0
         self._json = False
         self._script: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = dict(attrs)
+        if tag == "a" and values.get("href") and not self._hidden:
+            self._anchor = (values["href"], len(self.text))
         if tag in {"script", "style", "noscript"}:
             self._hidden += 1
             self._json = tag == "script" and values.get("type") == "application/ld+json"
@@ -172,6 +176,10 @@ class PageParser(HTMLParser):
             self.text.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._anchor:
+            href, start = self._anchor
+            self.links.append({"url": href, "label": "".join(self.text[start:]).strip()[:200]})
+            self._anchor = None
         if tag in {"script", "style", "noscript"}:
             if self._json:
                 with suppress(ValueError, RecursionError):

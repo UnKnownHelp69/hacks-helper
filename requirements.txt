@@ -4,6 +4,7 @@ aiohttp==3.14.5
 aiosqlite==0.22.1
 APScheduler==3.11.3
 httpx==0.28.1
+pydantic==2.13.5
 python-dotenv==1.2.4
 # IANA time zone database for zoneinfo (required on Windows, harmless elsewhere)
 tzdata==2026.5

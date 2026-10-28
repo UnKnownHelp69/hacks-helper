@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,6 +21,7 @@ async def service(storage, fake_bot):
     try:
         yield service
     finally:
+        await service.close()
         await github.close()
 
 
@@ -108,3 +110,70 @@ def test_validation_rejects_missing_dates_and_invalid_team_bounds():
     data["checkpoints"] = [{"title": "Слишком поздно", "at": (now + timedelta(days=3)).isoformat()}]
     with pytest.raises(UserError, match="Чекпоинт"):
         validate_hack(data)
+
+
+async def test_llm_import_preserves_post_and_parser_facts_and_stays_a_draft(
+    service,
+    storage,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "bot.services.hackathons.fetch_public_page",
+        AsyncMock(
+            return_value=("<p>Хакатон</p><p>Конец 10.11.2026 18:00</p>", "https://event.example/")
+        ),
+    )
+    service.llm.configured = True
+    extract = AsyncMock(
+        return_value={
+            "is_hackathon": True,
+            "title": "LLM title",
+            "team_min": 3,
+            "team_max": 6,
+            "start_at": "2026-11-05T07:00:00+00:00",
+            "checkpoints": [],
+        }
+    )
+    monkeypatch.setattr(service.llm, "extract", extract)
+    session = await service.import_post(
+        ALLOWED_CHAT,
+        USER_ID,
+        "Хакатон команды\nКоманда от 2 до 4\nhttps://event.example/",
+    )
+    assert session.data["title"] == "Хакатон команды"
+    assert (session.data["team_min"], session.data["team_max"]) == (2, 4)
+    assert session.data["end_at"] == "2026-11-10T15:00:00+00:00"
+    assert session.data["llm_imported"]
+    assert session.step == "preview"
+    assert await storage.hackathons.list(ALLOWED_CHAT) == []
+    assert await storage.workflow.session(USER_ID, session.token)
+    extract.assert_awaited_once()
+
+
+async def test_llm_failure_preserves_deterministic_data(service, monkeypatch):
+    service.llm.configured = True
+    monkeypatch.setattr(service.llm, "extract", AsyncMock(side_effect=UserError("LLM сбой")))
+    session = await service.import_post(ALLOWED_CHAT, USER_ID, "Хакатон: начало 05.11.2026 10:00")
+    assert session.data["start_at"] == "2026-11-05T07:00:00+00:00"
+    assert session.data["import_error"] == "LLM сбой"
+
+
+async def test_llm_can_recognize_a_link_without_regex_keyword(service, monkeypatch):
+    monkeypatch.setattr(
+        "bot.services.hackathons.fetch_public_page",
+        AsyncMock(return_value=("<h1>AI Challenge</h1>", "https://event.example/")),
+    )
+    service.llm.configured = True
+    monkeypatch.setattr(
+        service.llm,
+        "extract",
+        AsyncMock(
+            return_value={
+                "is_hackathon": True,
+                "title": "AI Challenge",
+                "checkpoints": [],
+            }
+        ),
+    )
+    session = await service.import_post(ALLOWED_CHAT, USER_ID, "https://event.example/")
+    assert session.data["title"] == "AI Challenge"

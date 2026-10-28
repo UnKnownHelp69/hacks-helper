@@ -1,0 +1,158 @@
+import json
+from zoneinfo import ZoneInfo
+
+import httpx
+import pytest
+
+from bot.errors import UserError
+from bot.services.hack_llm import Extraction, HackathonLLM, page_context
+
+TZ = ZoneInfo("Europe/Moscow")
+
+
+def fields(**overrides):
+    result = dict.fromkeys(Extraction.model_fields)
+    result.update(is_hackathon=True, title="AI Hack", team_min=2, team_max=5, checkpoints=[])
+    result.update(overrides)
+    return result
+
+
+def response(data=None, **overrides):
+    choice = {"finish_reason": "stop", "message": {"content": json.dumps(data or fields())}}
+    choice.update(overrides)
+    return {"choices": [choice]}
+
+
+def client(handler, key="test-secret"):
+    return HackathonLLM(
+        key,
+        "openrouter/free",
+        "https://openrouter.ai/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+
+
+async def test_structured_request_and_normalized_dates():
+    def handler(request):
+        assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
+        assert request.headers["Authorization"] == "Bearer test-secret"
+        body = json.loads(request.content)
+        assert body["provider"] == {"require_parameters": True}
+        schema = body["response_format"]["json_schema"]
+        assert schema["strict"] and not schema["schema"]["additionalProperties"]
+        assert set(schema["schema"]["required"]) == set(Extraction.model_fields)
+        assert body["max_tokens"] == 4000
+        context = json.loads(body["messages"][1]["content"])
+        assert context["timezone"] == TZ.key
+        assert context["page"]["links"] == [
+            {"url": "https://event.example/rules", "label": "Правила"}
+        ]
+        return httpx.Response(
+            200,
+            json=response(
+                fields(
+                    start_at="2026-11-05T10:00:00+03:00",
+                    checkpoints=[{"title": "Demo", "at": "2026-11-06T18:00:00Z"}],
+                    repo="https://github.com/team/solution",
+                )
+            ),
+        )
+
+    llm = client(handler)
+    try:
+        result = await llm.extract(
+            "Хакатон", '<a href="/rules">Правила</a>', "https://event.example/", TZ
+        )
+        assert result["start_at"] == "2026-11-05T07:00:00+00:00"
+        assert result["repo"] == "team/solution"
+        assert result["checkpoints"][0]["at"] == "2026-11-06T18:00:00+00:00"
+        assert "end_at" not in result
+    finally:
+        await llm.close()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        response(fields(team_min=True)),
+        response(fields(team_max=101)),
+        response(fields(start_at="2026-11-05T10:00:00")),
+        response(fields(start_at="0001-01-01T00:00:00+14:00")),
+        response(fields(org_chat_url="http://127.0.0.1/")),
+        response(fields(editing_id=7)),
+        response(fields(checkpoints=[{"title": "x", "at": "bad date"}])),
+        response(finish_reason="length"),
+        {"choices": [{"finish_reason": "stop", "message": {"refusal": "No"}}]},
+        {"choices": []},
+        {"choices": [None]},
+        {"choices": [["stop"]]},
+        {"choices": [{"finish_reason": "stop", "message": {"content": "invalid json"}}]},
+    ],
+)
+async def test_untrusted_invalid_or_incomplete_responses_are_rejected(payload):
+    llm = client(lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(UserError, match="обычного парсера"):
+            await llm.extract("post", "", None, TZ)
+    finally:
+        await llm.close()
+
+
+@pytest.mark.parametrize("status", [401, 402, 429, 500, 302])
+async def test_api_failure_has_no_retry_or_secret_in_error(status):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, text="secret provider response")
+
+    llm = client(handler)
+    try:
+        with pytest.raises(UserError) as error:
+            await llm.extract("post", "", None, TZ)
+        assert "secret" not in str(error.value)
+        assert len(calls) == 1
+    finally:
+        await llm.close()
+
+
+async def test_timeout_and_response_size_limit():
+    def timeout(request):
+        raise httpx.ReadTimeout("secret", request=request)
+
+    for handler in [timeout, lambda request: httpx.Response(200, content=b"x" * 128001)]:
+        llm = client(handler)
+        try:
+            with pytest.raises(UserError):
+                await llm.extract("post", "", None, TZ)
+        finally:
+            await llm.close()
+
+
+async def test_disabled_and_busy_clients_do_not_make_requests():
+    def unexpected(request):
+        pytest.fail("No API call expected")
+
+    llm = client(unexpected, key=None)
+    try:
+        assert await llm.extract("post", "", None, TZ) == {}
+        llm.configured = True
+        async with llm._slots, llm._slots:
+            with pytest.raises(UserError, match="занята"):
+                await llm.extract("post", "", None, TZ)
+    finally:
+        await llm.close()
+
+
+def test_context_is_bounded_and_excludes_scripts_and_local_links():
+    context = page_context(
+        "<script>secret script</script><style>hidden</style>"
+        '<a href="http://localhost/">local</a><a href="/rules">Rules</a>'
+        + "<p>"
+        + "x" * 60000
+        + "</p>",
+        "https://event.example/",
+    )
+    assert len(context["text"]) == 50000
+    assert "secret script" not in json.dumps(context)
+    assert context["links"] == [{"url": "https://event.example/rules", "label": "Rules"}]

@@ -255,4 +255,5 @@ async def _run_bot(settings: Settings, storage: Storage) -> None:
         if scheduler.running:
             scheduler.shutdown(wait=False)
         await ctx.github.close()
+        await ctx.hacks.close()
         await bot.session.close()

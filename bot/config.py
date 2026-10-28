@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -66,6 +67,9 @@ class Settings:
     allowed_chat_ids: set[int] = field(default_factory=set)
     bot_admin_ids: frozenset[int] = field(default_factory=frozenset)
     github_token: str | None = None
+    llm_api_key: str | None = field(default=None, repr=False)
+    llm_model: str = "openrouter/free"
+    llm_base_url: str = "https://openrouter.ai/api/v1"
     github_poll_interval_minutes: int = 10
     github_in_progress_label: str = "in progress"
     reminder_offsets_minutes: list[int] = field(default_factory=lambda: [1440, 180, 60])
@@ -102,12 +106,30 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         raise ConfigError(f"DEFAULT_TIMEZONE: unknown timezone '{tz_name}'") from exc
 
     log_file_raw = os.getenv("LOG_FILE", "logs/bot.log").strip()
+    llm_base_url = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1").strip().rstrip("/")
+    try:
+        endpoint = urlsplit(llm_base_url)
+        if (
+            endpoint.scheme != "https"
+            or not endpoint.hostname
+            or endpoint.username is not None
+            or endpoint.password is not None
+            or endpoint.query
+            or endpoint.fragment
+        ):
+            raise ValueError
+        _ = endpoint.port
+    except ValueError:
+        raise ConfigError("LLM_BASE_URL must be an HTTPS API URL without credentials") from None
 
     return Settings(
         bot_token=token,
         allowed_chat_ids=set(_parse_int_list(os.getenv("ALLOWED_CHAT_IDS"), "ALLOWED_CHAT_IDS")),
         bot_admin_ids=frozenset(_parse_int_list(os.getenv("BOT_ADMIN_IDS"), "BOT_ADMIN_IDS")),
         github_token=os.getenv("GITHUB_TOKEN", "").strip() or None,
+        llm_api_key=os.getenv("LLM_API_KEY", "").strip() or None,
+        llm_model=os.getenv("LLM_MODEL", "openrouter/free").strip() or "openrouter/free",
+        llm_base_url=llm_base_url,
         github_poll_interval_minutes=_parse_positive_int(
             os.getenv("GITHUB_POLL_INTERVAL_MINUTES"), "GITHUB_POLL_INTERVAL_MINUTES", 10
         ),

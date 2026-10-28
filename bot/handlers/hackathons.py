@@ -99,6 +99,8 @@ async def preview(
 ) -> None:
     tz = await ctx.zone(session.chat_id)
     lines = ["📝 <b>Проверьте данные хакатона</b>"]
+    if session.data.get("llm_imported"):
+        lines.append("Данные дополнены LLM. Проверьте их перед публикацией.")
     for key, label in FIELD_LABELS.items():
         value = session.data.get(key)
         if key == "spec_url" and session.data.get("spec_file_id"):

@@ -13,6 +13,7 @@ _SECRET_PATTERNS = [
     re.compile(r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}"),
     re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
 ]
 
 
