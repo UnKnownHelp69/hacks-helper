@@ -37,7 +37,8 @@ async def test_structured_request_and_normalized_dates():
         assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
         assert request.headers["Authorization"] == "Bearer test-secret"
         body = json.loads(request.content)
-        assert body["provider"] == {"require_parameters": True}
+        assert body["provider"] == {"require_parameters": True, "sort": "latency"}
+        assert body["reasoning"] == {"effort": "none"}
         schema = body["response_format"]["json_schema"]
         assert schema["strict"] and not schema["schema"]["additionalProperties"]
         assert set(schema["schema"]["required"]) == set(Extraction.model_fields)
@@ -54,6 +55,7 @@ async def test_structured_request_and_normalized_dates():
                     start_at="2026-11-05T10:00:00+03:00",
                     checkpoints=[{"title": "Demo", "at": "2026-11-06T18:00:00Z"}],
                     repo="https://github.com/team/solution",
+                    org_chat_url="https://t.me/registration_bot?start=null",
                 )
             ),
         )
@@ -67,6 +69,7 @@ async def test_structured_request_and_normalized_dates():
         assert result["repo"] == "team/solution"
         assert result["checkpoints"][0]["at"] == "2026-11-06T18:00:00+00:00"
         assert "end_at" not in result
+        assert "org_chat_url" not in result
     finally:
         await llm.close()
 
@@ -116,17 +119,27 @@ async def test_api_failure_has_no_retry_or_secret_in_error(status):
         await llm.close()
 
 
-async def test_timeout_and_response_size_limit():
+async def test_timeout_is_explained_without_exposing_exception(caplog):
     def timeout(request):
         raise httpx.ReadTimeout("secret", request=request)
 
-    for handler in [timeout, lambda request: httpx.Response(200, content=b"x" * 128001)]:
-        llm = client(handler)
-        try:
-            with pytest.raises(UserError):
-                await llm.extract("post", "", None, TZ)
-        finally:
-            await llm.close()
+    llm = client(timeout)
+    try:
+        with pytest.raises(UserError, match="40 секунд") as error:
+            await llm.extract("post", "", None, TZ)
+        assert "secret" not in str(error.value) + caplog.text
+        assert "timed out" in caplog.text
+    finally:
+        await llm.close()
+
+
+async def test_response_size_limit():
+    llm = client(lambda request: httpx.Response(200, content=b"x" * 128001))
+    try:
+        with pytest.raises(UserError):
+            await llm.extract("post", "", None, TZ)
+    finally:
+        await llm.close()
 
 
 async def test_disabled_and_busy_clients_do_not_make_requests():

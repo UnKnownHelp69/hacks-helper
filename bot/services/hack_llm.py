@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -15,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from bot.errors import UserError
 from bot.services.github import normalize_repo
 from bot.services.hack_import import PageParser, public_url
+
+log = logging.getLogger(__name__)
 
 
 class Checkpoint(BaseModel):
@@ -78,6 +81,18 @@ class Extraction(BaseModel):
         except UserError as exc:
             raise ValueError("Invalid repository") from exc
 
+    @field_validator("org_chat_url")
+    @classmethod
+    def organizer_chat(cls, value: str | None) -> str | None:
+        if value:
+            parts = urlsplit(value)
+            if parts.hostname in {"t.me", "telegram.me"} and (
+                {"start", "startgroup"} & parse_qs(parts.query, keep_blank_values=True).keys()
+            ):
+                # Telegram bot launch links are not participant/organizer chats.
+                return None
+        return value
+
 
 def page_context(html: str, url: str) -> dict[str, Any]:
     parser = PageParser()
@@ -113,6 +128,8 @@ Use a year only when explicitly stated or unambiguously established elsewhere in
 registration_end is the participant registration deadline, not the solution submission deadline.
 team_min/team_max are people per team; a maximum alone does not establish the minimum.
 repo is the participants' solution GitHub repository (owner/name), not an organizer's example.
+org_chat_url must be an explicitly identified hackathon group/channel for participants or
+organizer contact. A registration bot or the company's general social page is not this chat.
 Copy actual links, resolving relative links against the page URL. spec_url is rules/task brief.
 Extract named checkpoints, presentations and submission deadlines with known dates (up to 20).
 Keep titles concise, in the source language. Do not include commentary outside the JSON."""
@@ -173,7 +190,10 @@ class HackathonLLM:
                                 "schema": Extraction.model_json_schema(),
                             },
                         },
-                        "provider": {"require_parameters": True},
+                        "provider": {"require_parameters": True, "sort": "latency"},
+                        # Extraction needs facts, not a long reasoning pass that can exhaust
+                        # the output budget or deadline before producing any JSON.
+                        "reasoning": {"effort": "none"},
                         "max_tokens": 4000,
                     },
                 ) as response:
@@ -189,9 +209,21 @@ class HackathonLLM:
                     raise ValueError("Incomplete response")
                 result = Extraction.model_validate_json(choice["message"]["content"])
                 return result.model_dump(exclude_none=True)
+        except (httpx.TimeoutException, TimeoutError):
+            log.warning("Hackathon LLM timed out (model=%s)", self.model)
+            raise UserError(
+                "LLM не ответила за 40 секунд. Сохранён результат обычного парсера; "
+                "попробуйте импорт ещё раз или дополните черновик вручную"
+            ) from None
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            log.warning("Hackathon LLM HTTP %s (model=%s)", status, self.model)
+            raise UserError(
+                f"LLM API вернул HTTP {status}. Сохранён результат обычного парсера; "
+                "проверьте ключ, лимиты и поддержку модели"
+            ) from None
         except (
             httpx.HTTPError,
-            TimeoutError,
             ValueError,
             ValidationError,
             KeyError,
@@ -199,6 +231,7 @@ class HackathonLLM:
             TypeError,
             RecursionError,
         ):
+            log.warning("Hackathon LLM returned no usable extraction (model=%s)", self.model)
             # Provider bodies/prompts/headers may contain secrets: never log or show them.
             raise UserError(
                 "LLM не смогла заполнить данные. Сохранён результат обычного парсера; "

@@ -41,12 +41,14 @@ MONTHS = {
     "декабря": 12,
 }
 WORD_DATE_RE = re.compile(
-    r"(?P<day>\d{1,2})\s+(?P<month>" + "|".join(MONTHS) + r")\s+(?P<year>20\d{2})"
+    r"(?P<day>\d{1,2})\s+(?P<month>" + "|".join(MONTHS) + r")(?:\s+(?P<year>20\d{2}))?"
     r"(?:\s*(?:в|,)?\s*(?P<hour>\d{1,2}):(?P<minute>\d{2}))?",
     re.IGNORECASE,
 )
 RANGE_RE = re.compile(
-    r"(?P<first>\d{1,2})\s*[-–—]\s*(?P<last>\d{1,2})\s+(?P<month>"
+    r"(?P<first>\d{1,2})\s*(?:(?P<first_month>"
+    + "|".join(MONTHS)
+    + r")\s*)?(?:[-–—]|по)\s*(?P<last>\d{1,2})\s+(?P<month>"
     + "|".join(MONTHS)
     + r")\s+(?P<year>20\d{2})",
     re.IGNORECASE,
@@ -206,11 +208,15 @@ def _iso(raw: Any, tz: ZoneInfo) -> str | None:
     return (value if value.tzinfo else value.replace(tzinfo=tz)).astimezone(UTC).isoformat()
 
 
-def _line_dates(line: str, tz: ZoneInfo, *, end_of_day: bool = False) -> list[str]:
+def _line_dates(
+    line: str, tz: ZoneInfo, *, end_of_day: bool = False, year: int | None = None
+) -> list[str]:
     if match := RANGE_RE.search(line):
         try:
             month = MONTHS[match["month"].lower()]
-            first = datetime(int(match["year"]), month, int(match["first"]), tzinfo=tz)
+            first_month = MONTHS[(match["first_month"] or match["month"]).lower()]
+            first_year = int(match["year"]) - int(first_month > month)
+            first = datetime(first_year, first_month, int(match["first"]), tzinfo=tz)
             last = datetime(int(match["year"]), month, int(match["last"]), 23, 59, tzinfo=tz)
             return [first.astimezone(UTC).isoformat(), last.astimezone(UTC).isoformat()]
         except ValueError:
@@ -219,10 +225,13 @@ def _line_dates(line: str, tz: ZoneInfo, *, end_of_day: bool = False) -> list[st
     for pattern in (DATE_RE, WORD_DATE_RE):
         for match in pattern.finditer(line):
             parts = match.groupdict()
+            date_year = int(parts["year"]) if parts["year"] else year
+            if date_year is None:
+                continue
             month = MONTHS.get(parts["month"].lower()) or int(parts["month"])
             try:
                 value = datetime(
-                    int(parts["year"]),
+                    date_year,
                     month,
                     int(parts["day"]),
                     int(parts["hour"] or (23 if end_of_day else 0)),
@@ -238,6 +247,14 @@ def _line_dates(line: str, tz: ZoneInfo, *, end_of_day: bool = False) -> list[st
 def extract_post(text: str, tz: ZoneInfo) -> dict[str, Any]:
     """Only copy dates and limits actually present; missing fields stay editable and empty."""
     lines = [line.strip() for line in text[:20000].splitlines() if line.strip()]
+    # A single explicitly dated event period anchors nearby dates without a year.
+    # Never substitute the current year or use an unrelated copyright year.
+    years = set()
+    for match in RANGE_RE.finditer(text[:20000]):
+        year = int(match["year"])
+        first_month = MONTHS[(match["first_month"] or match["month"]).lower()]
+        years.update({year, year - int(first_month > MONTHS[match["month"].lower()])})
+    event_year = next(iter(years)) if len(years) == 1 else None
     result: dict[str, Any] = {"checkpoints": []}
     title = next(
         (line for line in lines if HACK_RE.search(line) and not URL_RE.fullmatch(line)), None
@@ -255,16 +272,19 @@ def extract_post(text: str, tz: ZoneInfo) -> dict[str, Any]:
     for line in lines:
         lower = line.lower()
         if re.search(r"регистрац|при[её]м заявок|подач[аи] заявок", lower):
-            dates = _line_dates(line, tz, end_of_day=True)
+            dates = _line_dates(line, tz, end_of_day=True, year=event_year)
             if dates:
                 result["registration_end"] = dates[-1]
         elif re.search(r"чекпоинт|checkpoint|защита|презентация", lower):
-            dates = _line_dates(line, tz)
+            dates = _line_dates(line, tz, year=event_year)
             if dates:
                 result["checkpoints"].append({"title": line.split(":", 1)[0][:80], "at": dates[0]})
         else:
             dates = _line_dates(
-                line, tz, end_of_day=bool(re.search(r"конец|окончани|финиш", lower))
+                line,
+                tz,
+                end_of_day=bool(re.search(r"конец|окончани|финиш", lower)),
+                year=event_year,
             )
             if len(dates) >= 2:
                 result.setdefault("start_at", dates[0])

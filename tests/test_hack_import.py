@@ -69,6 +69,29 @@ def test_russian_date_range_and_invalid_deep_metadata():
     assert extract_page(html, "https://hack.example/", MSK)["is_hackathon"]
 
 
+def test_ostrovok_page_dates_share_the_explicit_event_year():
+    # Relevant public page wording/layout, including dates without a repeated year.
+    html = """<h1>О! Хакатон</h1><h2>Длительность</h2>
+    <p>Восемь дней: с 23 октября по 30 октября 2026 года.</p>
+    <h2>Как присоединиться</h2>
+    <p>Регистрация закончится 16 октября в 23:59 (UTC+3)</p>
+    <p>Разработчики, аналитики и продакты командой до пяти человек.</p>"""
+    result = extract_page(html, "https://ostrovok.tech/hackathon/", MSK)
+    assert result["registration_end"] == "2026-10-16T20:59:00+00:00"
+    assert result["start_at"] == "2026-10-22T21:00:00+00:00"
+    assert result["end_at"] == "2026-10-30T20:59:00+00:00"
+    assert "team_min" not in result
+
+
+def test_dates_without_year_are_not_anchored_to_current_or_ambiguous_year():
+    for text in (
+        "Хакатон\nРегистрация до 16 октября\nCopyright 2026",
+        "Хакатон\n3–5 ноября 2025\n3–5 ноября 2026\nРегистрация до 16 октября",
+        "Хакатон\nС 28 декабря по 3 января 2026\nРегистрация до 16 декабря",
+    ):
+        assert "registration_end" not in extract_post(text, MSK)
+
+
 @pytest.mark.parametrize(
     "url",
     [
