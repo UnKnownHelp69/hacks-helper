@@ -323,8 +323,8 @@ async def test_hack_list_and_card_are_chat_scoped(app, chat_id):
     assert not any("Чужой хакатон" in label or "Завершённый хакатон" in label for label in labels)
     await send(app, "/hack h2026", chat_id=chat_id)
     text = await shown(app, ADMIN)
-    assert "Хакатон <команды>" in unescape(text) and "admin_user" in text
-    assert "05.12.2026 10:00" in text and "Участники (1)" in text
+    assert "Хакатон <команды>" in unescape(text) and "admin_user" not in text
+    assert "05.12.2026 10:00" in text and "Участники: 1" in text
     await send(app, "/hack nope", chat_id=chat_id)
     assert "не найден, список: /hack" in await shown(app, ADMIN)
     await send(app, "/hack h2026 extra", chat_id=chat_id)
@@ -844,7 +844,7 @@ async def test_import_progress_stays_personal_and_fills_fields_before_completion
         rules_release.set()
         await job
         complete = private_panel(app, ALICE, chat_id)
-        assert "создан" in complete.text if chat_id < 0 else "Голосование" in complete.text
+        assert "создан" in complete.text if chat_id < 0 else "Участники:" in complete.text
         assert (await app["storage"].hackathons.list(chat_id))[0].team_min == 2
         assert (complete.ephemeral_message_id if chat_id < 0 else complete.message_id) == initial_id
         sends = [
@@ -1024,3 +1024,70 @@ async def test_invalid_manual_dates_are_retried_on_same_panel_before_creation(ap
         if isinstance(method, SendMessage) and method.ephemeral_message_parameters
     ]
     assert len(personal) == 1
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+async def test_compact_cards_hide_checkpoint_details_and_open_them_privately_in_place(app, chat_id):
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    await send(app, "/hack", ALICE, chat_id)
+    initial = private_panel(app, chat_id=chat_id)
+    panel_id = initial.ephemeral_message_id if chat_id < 0 else initial.message_id
+    hack = await create_hack(app, chat_id=chat_id)
+    editing = await app["ctx"].hacks.edit(hack.id, USER_ID)
+    editing.data["checkpoints"] = [
+        {"title": "Промежуточная защита", "at": "2026-12-06T09:00:00+00:00"},
+        {"title": "Финальное демо", "at": "2026-12-07T09:00:00+00:00"},
+    ]
+    await app["ctx"].hacks.publish(editing)
+    # Historical choices stay stored, but are not offered in the compact UI.
+    await app["storage"].workflow.vote(hack.id, USER_ID, "maybe")
+    await app["ctx"].hack_notifications.flush()
+    shared = next(
+        message
+        for message in reversed(app["session"].messages)
+        if not message.receiver_user and message.reply_markup
+    )
+    shared_buttons = [item for row in shared.reply_markup.inline_keyboard for item in row]
+    assert all("Думаю" not in item.text and "Голоса" not in item.text for item in shared_buttons)
+    assert "Промежуточная защита" not in shared.text and "Финальное демо" not in shared.text
+    assert "🤔" not in shared.text
+    checkpoint_button = next(item for item in shared_buttons if "Чекпоинты" in item.text)
+    await press(app, checkpoint_button.callback_data, ALICE, chat_id, source=shared)
+    details = private_panel(app, chat_id=chat_id)
+    assert (details.ephemeral_message_id if chat_id < 0 else details.message_id) == panel_id
+    if chat_id < 0:
+        assert details.receiver_user.id == USER_ID
+    assert "Промежуточная защита" in details.text and "Финальное демо" in details.text
+    assert "06.12.2026 12:00" in details.text
+    assert [item.text for row in details.reply_markup.inline_keyboard for item in row] == ["Назад"]
+    await click(app, "Назад", chat_id=chat_id)
+    compact = private_panel(app, chat_id=chat_id)
+    assert (compact.ephemeral_message_id if chat_id < 0 else compact.message_id) == panel_id
+    assert "Промежуточная защита" not in compact.text and "Финальное демо" not in compact.text
+    assert all(
+        "Думаю" not in item.text and "Голоса" not in item.text
+        for row in compact.reply_markup.inline_keyboard
+        for item in row
+    )
+    await click(app, "Чекпоинты", chat_id=chat_id)
+    assert "Финальное демо" in private_panel(app, chat_id=chat_id).text
+    assert len(await app["storage"].workflow.checkpoints(hack.id)) == 2
+    assert (await app["storage"].workflow.votes(hack.id))["maybe"] == [USER_ID]
+    personal = [
+        method
+        for method in app["session"].requests
+        if isinstance(method, SendMessage) and (chat_id > 0 or method.ephemeral_message_parameters)
+    ]
+    assert len(personal) == 1
+
+
+async def test_empty_checkpoint_list_does_not_add_buttons_to_cards(app):
+    hack = await create_hack(app)
+    await send(app, f"/hack {hack.slug}", ALICE)
+    card = private_panel(app)
+    assert not any(
+        "Чекпоинты" in item.text for row in card.reply_markup.inline_keyboard for item in row
+    )
+    text, markup = await app["ctx"].hack_notifications.card(hack)
+    assert not any("Чекпоинты" in item.text for row in markup.inline_keyboard for item in row)
+    assert "чекпоинт" not in text.lower()

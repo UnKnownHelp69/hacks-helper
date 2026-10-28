@@ -20,7 +20,6 @@ from bot.errors import UserError
 from bot.handlers.base import usage
 from bot.handlers.import_progress import ImportProgress
 from bot.handlers.interactive import callback_session, keyboard, session_button
-from bot.handlers.render import hackathon_card
 from bot.middlewares.security import command_name
 from bot.respond import personal_options, personal_reply
 from bot.services.args import parse_command
@@ -197,32 +196,27 @@ async def prompt(
 
 async def show_hack(event: Event, ctx: AppContext, session: HackSession, notice: str = "") -> None:
     hack = await ctx.hacks.hackathon(int(session.data["hack_id"]), session.user_id)
-    text = await hackathon_card(ctx, hack, utcnow())
-    votes = await ctx.storage.workflow.votes(hack.id)
-    mine = next((choice for choice, users in votes.items() if session.user_id in users), None)
-    labels = {"yes": "участвую", "no": "не участвую", "maybe": "пока думаю"}
-    text += (
-        f"\nРазмер команды: {hack.team_min}–{hack.team_max}"
-        f"\nМой голос: {labels.get(mine, 'не выбран')}"
-    )
+    text, _ = await ctx.hack_notifications.card(hack)
     checkpoints = await ctx.storage.workflow.checkpoints(hack.id)
-    tz = await ctx.zone(hack.chat_id)
-    for checkpoint in checkpoints:
-        text += f"\n📍 {escape(checkpoint.title)}: {format_dt(checkpoint.at, tz)}"
     rows = []
     if hack.is_active and hack.end_at > utcnow():
         rows.append(
             [
                 button(session, "✅ Участвую", "vote", "yes"),
                 button(session, "❌ Нет", "vote", "no"),
-                button(session, "🤔 Думаю", "vote", "maybe"),
             ]
         )
-        rows.append([button(session, "✏️ Редактировать", "edit")])
-    rows.append([button(session, "👥 Команды", "teams", 0), button(session, "Голоса", "votes", 0)])
+    details = [button(session, "👥 Команды", "teams", 0)]
+    if checkpoints:
+        details.append(button(session, "📍 Чекпоинты", "checkpoints"))
+    rows.append(details)
     if hack.spec_file_id:
         rows.append([button(session, "📄 Получить ТЗ", "spec")])
-    rows.append([button(session, "В меню", "menu")])
+    navigation = []
+    if hack.is_active and hack.end_at > utcnow():
+        navigation.append(button(session, "✏️ Редактировать", "edit"))
+    navigation.append(button(session, "В меню", "menu"))
+    rows.append(navigation)
     if notice:
         text = notice + "\n\n" + text
     await personal_reply(event, text, reply_markup=keyboard(rows))
@@ -295,35 +289,30 @@ async def show_roster(event: Event, ctx: AppContext, session: HackSession, argum
     await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows))
 
 
-async def show_votes(event: Event, ctx: AppContext, session: HackSession, page: int) -> None:
-    hack = await ctx.hacks.hackathon(int(session.data["hack_id"]), session.user_id)
-    votes = await ctx.storage.workflow.votes(hack.id)
-    entries = [(choice, uid) for choice, users in votes.items() for uid in users]
-    page = min(max(page, 0), max(0, (len(entries) - 1) // 20))
-    labels = {"yes": "✅", "no": "❌", "maybe": "🤔"}
-    lines = [f"<b>Голоса: {escape(hack.display_name)}</b>"]
-    for choice, uid in entries[page * 20 : (page + 1) * 20]:
-        lines.append(f"{labels[choice]} {await ctx.directory.plain(hack.chat_id, uid)}")
-    rows = []
-    if page:
-        rows.append([button(session, "←", "votes", page - 1)])
-    if (page + 1) * 20 < len(entries):
-        rows.append([button(session, "→", "votes", page + 1)])
-    rows.append([button(session, "К карточке", "card")])
-    await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows))
-
-
 async def checkpoints_menu(event: Event, ctx: AppContext, session: HackSession) -> None:
+    editing = bool(session.data.get("editing_id"))
+    hack_id = int(session.data["editing_id"] if editing else session.data["hack_id"])
+    await ctx.hacks.hackathon(hack_id, session.user_id)
     tz = await ctx.zone(session.chat_id)
     lines = ["📍 <b>Чекпоинты</b>"]
     rows = []
-    for index, checkpoint in enumerate(session.data.get("checkpoints", [])):
-        at = format_dt(datetime.fromisoformat(checkpoint["at"]), tz)
-        lines.append(f"• {escape(checkpoint['title'])}: {at}")
-        rows.append([button(session, f"Удалить: {checkpoint['title'][:35]}", "cpdel", index)])
-    if len(session.data.get("checkpoints", [])) < 20:
+    entries = (
+        [
+            (item["title"], datetime.fromisoformat(item["at"]))
+            for item in session.data.get("checkpoints", [])
+        ]
+        if editing
+        else [(item.title, item.at) for item in await ctx.storage.workflow.checkpoints(hack_id)]
+    )
+    for index, (title, at) in enumerate(entries):
+        lines.append(f"• {escape(title)}: {format_dt(at, tz)}")
+        if editing:
+            rows.append([button(session, f"Удалить: {title[:35]}", "cpdel", index)])
+    if not entries:
+        lines.append("Чекпоинтов пока нет.")
+    if editing and len(entries) < 20:
         rows.append([button(session, "➕ Добавить чекпоинт", "cpadd")])
-    rows.append([button(session, "Назад", "edit_menu")])
+    rows.append([button(session, "Назад", "edit_menu" if editing else "card")])
     await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows))
 
 
@@ -377,7 +366,7 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
         elif action == "edit_menu":
             await edit_menu(callback, ctx, session)
         elif action in {"checkpoints", "cpdel"}:
-            if not session.data.get("editing_id"):
+            if action == "cpdel" and not session.data.get("editing_id"):
                 raise UserError("Сначала создайте хакатон")
             if action == "cpdel":
                 index = int(argument)
@@ -385,7 +374,7 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
                     raise UserError("Чекпоинт уже удалён")
                 session.data["checkpoints"].pop(index)
                 session = await saved_edit(ctx, session)
-            session.step = "edit_checkpoints"
+            session.step = "edit_checkpoints" if session.data.get("editing_id") else "view"
             await ctx.storage.workflow.save_session(session)
             await checkpoints_menu(callback, ctx, session)
         elif action == "cpadd":
@@ -416,6 +405,8 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
             session = await ctx.hacks.edit(int(session.data["hack_id"]), session.user_id)
             await edit_menu(callback, ctx, session)
         elif action == "vote":
+            if argument not in {"yes", "no"}:
+                raise UserError("Выберите «Участвую» или «Нет»")
             result = await ctx.hacks.vote(int(session.data["hack_id"]), session.user_id, argument)
             if argument == "yes" and result is None:
                 await show_teams(callback, ctx, session)
@@ -467,7 +458,7 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
         elif action == "roster":
             await show_roster(callback, ctx, session, argument)
         elif action == "votes":
-            await show_votes(callback, ctx, session, int(argument))
+            await show_hack(callback, ctx, session)
         elif action == "spec":
             hack = await ctx.hacks.hackathon(int(session.data["hack_id"]), session.user_id)
             if not hack.spec_file_id:
@@ -488,7 +479,9 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
         )
 
 
-@router.callback_query(F.data.startswith("hv:") | F.data.startswith("hm:"))
+@router.callback_query(
+    F.data.startswith("hv:") | F.data.startswith("hm:") | F.data.startswith("hc:")
+)
 async def public_hack_action(callback: CallbackQuery, ctx: AppContext) -> None:
     parts = (callback.data or "").split(":")
     if len(parts) not in {2, 3} or not parts[1].isdigit():
@@ -500,9 +493,14 @@ async def public_hack_action(callback: CallbackQuery, ctx: AppContext) -> None:
     session = await ctx.storage.workflow.new_session(
         callback.from_user.id, hack.chat_id, "view", {"hack_id": hack.id}
     )
+    if parts[0] == "hc":
+        if len(parts) != 2:
+            raise UserError("Кнопка недоступна")
+        await checkpoints_menu(callback, ctx, session)
+        return
     result = None
     if parts[0] == "hv":
-        if len(parts) != 3:
+        if len(parts) != 3 or parts[2] not in {"yes", "no"}:
             raise UserError("Неизвестный вариант голосования")
         result = await ctx.hacks.vote(hack.id, session.user_id, parts[2])
     if parts[0] == "hv" and parts[2] == "yes" and result is None:
