@@ -136,6 +136,18 @@ class HackWorkflowRepo:
             raise UserError("Это действие уже обработано или диалог устарел. Откройте /hack")
         session.revision += 1
 
+    async def bind_prompt(self, session: HackSession, message_id: int) -> bool:
+        """Bind delivery metadata without invalidating the buttons just rendered."""
+        changed = await self.db.execute(
+            "UPDATE hack_sessions SET data=json_set(data,'$._prompt_id',?) "
+            "WHERE token=? AND user_id=? AND revision=? AND expires_at>?",
+            (message_id, session.token, session.user_id, session.revision, to_db(utcnow())),
+        )
+        if changed:
+            session.data["_prompt_id"] = message_id
+        # A newer interaction may already have advanced or closed this form.
+        return bool(changed)
+
     async def checkpoints(self, hack_id: int) -> list[Checkpoint]:
         rows = await self.db.fetchall(
             "SELECT * FROM hack_checkpoints WHERE hackathon_id=? ORDER BY at,id", (hack_id,)

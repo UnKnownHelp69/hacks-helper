@@ -1091,3 +1091,47 @@ async def test_empty_checkpoint_list_does_not_add_buttons_to_cards(app):
     text, markup = await app["ctx"].hack_notifications.card(hack)
     assert not any("Чекпоинты" in item.text for row in markup.inline_keyboard for item in row)
     assert "чекпоинт" not in text.lower()
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("answer", [None, "Незавершённый хакатон"])
+async def test_cancel_creation_works_on_current_prompt_without_leaving_the_panel(
+    app, chat_id, answer
+):
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    await send(app, "/hack", ALICE, chat_id)
+    initial = private_panel(app, chat_id=chat_id)
+    panel_id = initial.ephemeral_message_id if chat_id < 0 else initial.message_id
+    await click(app, "Создать вручную", chat_id=chat_id)
+    if answer is not None:
+        await answer_form(app, answer, chat_id=chat_id)
+    await click(app, "Отмена", chat_id=chat_id)
+    current = private_panel(app, chat_id=chat_id)
+    assert (current.ephemeral_message_id if chat_id < 0 else current.message_id) == panel_id
+    assert "Хакатоны" in current.text and "устарел" not in current.text
+    session = await app["storage"].workflow.session(USER_ID, chat_id=chat_id)
+    assert session.step == "menu"
+    assert await app["storage"].hackathons.list(chat_id) == []
+    assert (
+        await app["storage"].db.fetchall("SELECT 1 FROM hack_sessions WHERE step LIKE 'form:%'")
+        == []
+    )
+
+
+async def test_cancel_import_prompt_returns_to_menu_without_starting_import(app):
+    await send(app, "/hack", ALICE)
+    await click(app, "Из поста / ссылки")
+    await click(app, "Отмена")
+    assert "Хакатоны" in private_panel(app).text
+    assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
+
+
+async def test_cancel_edit_prompt_returns_to_card_without_changing_hackathon(app):
+    hack = await create_hack(app)
+    await send(app, f"/hack {hack.slug}", ALICE)
+    await click(app, "Редактировать")
+    await click(app, "Название")
+    await click(app, "Отмена")
+    assert (await app["storage"].hackathons.get_by_id(hack.id)).title == hack.title
+    assert "Регистрация до:" in private_panel(app).text
+    assert "Введите:" not in private_panel(app).text

@@ -188,10 +188,10 @@ async def prompt(
         reply_markup=keyboard([[button(session, "Отмена", "cancel")]]),
     )
     if isinstance(sent, Message):
-        session.data["_prompt_id"] = (
+        prompt_id = (
             sent.ephemeral_message_id if sent.ephemeral_message_id is not None else sent.message_id
         )
-        await ctx.storage.workflow.save_session(session)
+        await ctx.storage.workflow.bind_prompt(session, prompt_id)
 
 
 async def show_hack(event: Event, ctx: AppContext, session: HackSession, notice: str = "") -> None:

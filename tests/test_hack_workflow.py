@@ -161,3 +161,26 @@ async def test_removing_unfinished_forms_preserves_hackathons_votes_and_model_pr
     assert await storage.hackathons.get_by_id(hack_id) is not None
     assert (await storage.workflow.votes(hack_id))["yes"] == [USER_ID]
     assert await storage.users.llm_preference(USER_ID) == ("gigachat", "GigaChat")
+
+
+async def test_prompt_binding_does_not_change_button_revision_or_overwrite_form_fields(storage):
+    session = await storage.workflow.new_session(
+        USER_ID, ALLOWED_CHAT, "form:title", {"_mode": "create"}
+    )
+    await storage.workflow.save_session(session)
+    revision = session.revision
+    assert await storage.workflow.bind_prompt(session, 123)
+    stored = await storage.workflow.session(USER_ID, session.token)
+    assert stored.revision == revision == session.revision
+    assert stored.data == {"_mode": "create", "_prompt_id": 123}
+    # Normal state changes still advance the revision and reject old operations.
+    await storage.workflow.save_session(stored)
+    assert not await storage.workflow.bind_prompt(session, 456)
+    assert (await storage.workflow.session(USER_ID, session.token)).data["_prompt_id"] == 123
+
+
+async def test_late_prompt_binding_cannot_restore_a_cancelled_session(storage):
+    session = await storage.workflow.new_session(USER_ID, ALLOWED_CHAT, "form:title")
+    await storage.workflow.delete_session(session)
+    assert not await storage.workflow.bind_prompt(session, 123)
+    assert await storage.workflow.session(USER_ID, session.token) is None
