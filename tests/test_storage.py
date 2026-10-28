@@ -17,6 +17,66 @@ async def test_migrations_are_idempotent():
     await db.close()
 
 
+async def test_model_preference_survives_reopen_and_does_not_change_registry(tmp_path):
+    path = tmp_path / "persistent.db"
+    db = Database(path)
+    await db.connect()
+    storage = Storage(db, "Europe/Moscow")
+    await storage.users.upsert(1, "alice", "Alice", None)
+    await storage.users.set_llm_preference(1, "gigachat", "GigaChat-Pro")
+    await storage.users.upsert(1, "alice_new", "Alice", None)
+    await db.close()
+    await db.connect()
+    assert await storage.users.llm_preference(1) == ("gigachat", "GigaChat-Pro")
+    assert await storage.users.llm_preference(2) is None
+    assert (await storage.users.get(1)).username == "alice_new"
+    await storage.users.reset_llm_preference(1)
+    assert await storage.users.llm_preference(1) is None
+    await db.close()
+
+
+async def test_v3_upgrade_and_rollback_preserve_existing_data():
+    import aiosqlite
+
+    from bot.db.migrations import MIGRATIONS
+
+    conn = await aiosqlite.connect(":memory:")
+    try:
+        await get_version(conn)
+        for script in MIGRATIONS[:3]:
+            await conn.executescript(script)
+        await conn.execute("UPDATE schema_version SET version=3")
+        await conn.execute(
+            "INSERT INTO users(user_id,first_name,updated_at) VALUES(1,'Alice','2026-10-28')"
+        )
+        await conn.execute(
+            "INSERT INTO hack_sessions(user_id,chat_id,token,step,data,expires_at,updated_at) "
+            "VALUES(1,1,'draft','preview','{\"title\":\"Existing hack\"}','2027','2026')"
+        )
+        await conn.execute(
+            "INSERT INTO hackathons(chat_id,slug,registration_end,start_at,end_at,created_at) "
+            "VALUES(1,'existing','2026-11-01','2026-11-02','2026-11-03','2026-10-28')"
+        )
+        await conn.commit()
+        async with conn.execute("SELECT * FROM hack_sessions") as cur:
+            before = await cur.fetchall()
+        assert await migrate(conn) == LATEST_VERSION
+        assert await migrate(conn) == LATEST_VERSION
+        async with conn.execute("SELECT * FROM hack_sessions") as cur:
+            assert await cur.fetchall() == before
+        async with conn.execute("SELECT slug FROM hackathons") as cur:
+            assert await cur.fetchall() == [("existing",)]
+        # Revert just the additive feature schema in this synthetic database.
+        await conn.executescript("DROP TABLE llm_preferences; UPDATE schema_version SET version=3;")
+        async with conn.execute("SELECT * FROM hack_sessions") as cur:
+            assert await cur.fetchall() == before
+        async with conn.execute("SELECT slug FROM hackathons") as cur:
+            assert await cur.fetchall() == [("existing",)]
+        assert await migrate(conn) == LATEST_VERSION
+    finally:
+        await conn.close()
+
+
 async def test_registry_username_change(storage):
     await storage.users.upsert(1, "alice", "Alice", None)
     await storage.users.upsert(1, "alice_new", "Alice", None)

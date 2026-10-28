@@ -80,6 +80,7 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
                 button(session, "🔗 Из поста / ссылки", "import"),
             ],
             [button(session, "Активные" if archived else "Архив", "archive")],
+            [button(session, "🤖 Модель нейросети", "llm")],
         ]
     )
     drafts = await ctx.storage.workflow.drafts(session.user_id, session.chat_id)
@@ -96,6 +97,72 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
     await personal_reply(event, text, reply_markup=keyboard(rows))
 
 
+async def llm_menu(event: Event, ctx: AppContext, session: HackSession) -> None:
+    session.step = "llm"
+    await ctx.storage.workflow.save_session(session)
+    provider, model = await ctx.hacks.llm_selection(session.user_id)
+    label = "GigaChat" if provider == "gigachat" else "OpenRouter / совместимый API"
+    text = (
+        f"🤖 <b>Модель нейросети</b>\nСейчас: {label} · <code>{escape(model)}</code>\n\n"
+        "Выбор сохраняется для вас и применяется к следующим импортам во всех подключённых чатах. "
+        "Текущая обработка продолжится с прежней моделью.\n"
+        "Подключение провайдеров настраивает владелец бота. "
+        "Текст поста и страницы передаются выбранному провайдеру.\n"
+        "💳 Платные модели расходуют баланс API; GigaChat — квоту вашего тарифа."
+    )
+    if not ctx.hacks.llm.is_configured(provider):
+        text += "\n\n⚠️ Текущий провайдер не настроен: работает обычный парсер."
+    await personal_reply(
+        event,
+        text,
+        reply_markup=keyboard(
+            [
+                [button(session, "OpenRouter / совместимый API", "llm_provider", "openrouter")],
+                [button(session, "GigaChat · Сбер", "llm_provider", "gigachat")],
+                [button(session, "Сбросить на настройку бота", "llm_reset")],
+                [button(session, "В меню", "menu")],
+            ]
+        ),
+    )
+
+
+async def llm_models(
+    event: Event, ctx: AppContext, session: HackSession, provider: str, page: int = 0
+) -> None:
+    if provider not in {"openrouter", "gigachat"}:
+        raise UserError("Неизвестный провайдер")
+    models = await ctx.hacks.llm.available_models(provider)
+    session.step = "llm"
+    session.data["_llm_provider"] = provider
+    session.data["_llm_models"] = models
+    await ctx.storage.workflow.save_session(session)
+    selected = await ctx.hacks.llm_selection(session.user_id)
+    page = min(max(page, 0), max(0, (len(models) - 1) // 8))
+    rows = []
+    for index in range(page * 8, min(len(models), (page + 1) * 8)):
+        model = models[index]
+        prefix = "✅ " if selected == (provider, model) else ""
+        if provider == "openrouter" and ctx.hacks.llm.is_openrouter:
+            prefix += "🆓 " if model == "openrouter/free" or model.endswith(":free") else "💳 "
+        rows.append([button(session, (prefix + model)[:60], "llm_pick", index)])
+    navigation = []
+    if page:
+        navigation.append(button(session, "←", "llm_page", page - 1))
+    if (page + 1) * 8 < len(models):
+        navigation.append(button(session, "→", "llm_page", page + 1))
+    if navigation:
+        rows.append(navigation)
+    rows.append([button(session, "К выбору провайдера", "llm")])
+    await personal_reply(
+        event,
+        f"🤖 <b>{'GigaChat' if provider == 'gigachat' else 'OpenRouter / API'}</b>\n"
+        f"Страница {page + 1} из {max(1, (len(models) + 7) // 8)}. "
+        "Выберите модель для следующих импортов.\n"
+        "🆓 — бесплатная; 💳 — расходует баланс; GigaChat — по тарифу API.",
+        reply_markup=keyboard(rows),
+    )
+
+
 async def preview(
     event: Event,
     ctx: AppContext,
@@ -108,6 +175,8 @@ async def preview(
     lines = ["📝 <b>Проверьте данные хакатона</b>"]
     if session.data.get("llm_imported"):
         lines.append("Данные дополнены LLM. Проверьте их перед публикацией.")
+        if session.data.get("llm_model"):
+            lines.append(f"Модель: {escape(session.data['llm_model'])}")
     for key, label in FIELD_LABELS.items():
         value = session.data.get(key)
         if key == "spec_url" and session.data.get("spec_file_id"):
@@ -402,6 +471,24 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
     try:
         if action == "menu":
             await menu(callback, ctx)
+        elif action == "llm":
+            await llm_menu(callback, ctx, session)
+        elif action == "llm_provider":
+            await llm_models(callback, ctx, session, argument)
+        elif action == "llm_page":
+            await llm_models(callback, ctx, session, session.data["_llm_provider"], int(argument))
+        elif action == "llm_pick":
+            index = int(argument)
+            models = session.data["_llm_models"]
+            if session.step != "llm" or not 0 <= index < len(models):
+                raise UserError("Список моделей устарел. Откройте /hack")
+            await ctx.hacks.select_llm(
+                session.chat_id, session.user_id, session.data["_llm_provider"], models[index]
+            )
+            await llm_menu(callback, ctx, session)
+        elif action == "llm_reset":
+            await ctx.storage.users.reset_llm_preference(session.user_id)
+            await llm_menu(callback, ctx, session)
         elif action in {"page", "archive"}:
             session.data["page"] = int(argument) if action == "page" else 0
             if action == "archive":

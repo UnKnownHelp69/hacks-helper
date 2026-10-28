@@ -554,6 +554,47 @@ async def test_non_admin_manual_creation_edit_and_ephemeral_input(app):
     )
 
 
+async def test_model_menu_is_personal_owner_bound_paginated_and_persistent(app, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    models = ["GigaChat", *[f"GigaChat-{i}" for i in range(10)]]
+    monkeypatch.setattr(app["ctx"].hacks.llm, "available_models", AsyncMock(return_value=models))
+    bob = tg_user(3003, "bob_user", "Bob")
+    await send(app, "/hack", ALICE, ephemeral=True)
+    await click(app, "Модель нейросети")
+    await click(app, "GigaChat · Сбер")
+    panel = private_panel(app)
+    item = panel.reply_markup.inline_keyboard[0][0]
+    await press(app, item.callback_data, bob, source=panel)
+    assert await app["storage"].users.llm_preference(bob.id) is None
+    await press(app, item.callback_data, ALICE, source=panel)
+    assert await app["storage"].users.llm_preference(USER_ID) == ("gigachat", "GigaChat")
+    await send(app, "/hack", ALICE, ephemeral=True)
+    await click(app, "Модель нейросети")
+    assert "GigaChat" in app["session"].last_text()
+    await click(app, "GigaChat · Сбер")
+    await click(app, "→")
+    assert "Страница 2" in app["session"].last_text()
+    await click(app, "GigaChat-9")
+    assert await app["storage"].users.llm_preference(USER_ID) == ("gigachat", "GigaChat-9")
+    await click(app, "Сбросить")
+    assert await app["storage"].users.llm_preference(USER_ID) is None
+    assert "openrouter/free" in app["session"].last_text()
+    assert all(
+        method.ephemeral_message_parameters is not None
+        for method in app["session"].requests
+        if isinstance(method, SendMessage)
+    )
+
+
+async def test_gigachat_menu_without_key_gives_private_setup_instructions(app):
+    await send(app, "/hack", ALICE, ephemeral=True)
+    await click(app, "Модель нейросети")
+    await click(app, "GigaChat · Сбер")
+    assert "GIGACHAT_CREDENTIALS" in app["session"].last_text()
+    assert await app["storage"].users.llm_preference(USER_ID) is None
+
+
 async def test_auto_url_requires_author_confirmation_and_deduplicates(app, monkeypatch):
     import json
 

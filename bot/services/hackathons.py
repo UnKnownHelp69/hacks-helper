@@ -45,11 +45,27 @@ class HackathonService:
         self.directory = directory
         self.github = github
         self.llm = llm or HackathonLLM(
-            settings.llm_api_key, settings.llm_model, settings.llm_base_url
+            settings.llm_api_key,
+            settings.llm_model,
+            settings.llm_base_url,
+            default_provider=settings.llm_provider,
+            gigachat_credentials=settings.gigachat_credentials,
+            gigachat_scope=settings.gigachat_scope,
+            gigachat_model=settings.gigachat_model,
+            gigachat_ca_bundle_file=settings.gigachat_ca_bundle_file,
         )
 
     async def close(self) -> None:
         await self.llm.close()
+
+    async def llm_selection(self, user_id: int) -> tuple[str, str]:
+        return await self.storage.users.llm_preference(user_id) or self.llm.default_selection
+
+    async def select_llm(self, chat_id: int, user_id: int, provider: str, model: str) -> None:
+        await self.require_access(chat_id, user_id)
+        if model not in await self.llm.available_models(provider):
+            raise UserError("Модель недоступна. Заново откройте список моделей")
+        await self.storage.users.set_llm_preference(user_id, provider, model)
 
     async def require_access(self, chat_id: int, user_id: int) -> None:
         if not self.settings.is_chat_allowed(chat_id):
@@ -129,6 +145,8 @@ class HackathonService:
         if not explicit and not HACK_RE.search(text) and not URL_RE.search(text):
             return None
         await self.require_access(chat_id, user_id)
+        # Snapshot once: changing preferences cannot switch providers halfway through an import.
+        selection = await self.llm_selection(user_id)
         tz = await chat_zone(self.storage, chat_id, self.settings.default_timezone)
         data = extract_post(text, tz)
         if explicit and not data.get("title"):
@@ -222,7 +240,8 @@ class HackathonService:
                         await report("Данные со страницы найдены")
                     except UserError as exc:
                         warning(exc.message)
-                if self.llm.configured:
+                if self.llm.is_configured(selection[0]):
+                    data["llm_provider"], data["llm_model"] = selection
                     # One main page and at most three linked documents; no autonomous URL guesses.
                     for index in range(MAX_IMPORT_DOCUMENTS):
                         await report(
@@ -240,7 +259,13 @@ class HackathonService:
                         ]
                         try:
                             result = await self.llm.extract(
-                                text, html, final_url, tz, previous_pages=previous, current=data
+                                text,
+                                html,
+                                final_url,
+                                tz,
+                                previous_pages=previous,
+                                current=data,
+                                selection=selection,
                             )
                         except UserError as exc:
                             warning(exc.message)

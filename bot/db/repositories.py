@@ -156,6 +156,22 @@ class UsersRepo:
     async def clear_username(self, user_id: int) -> None:
         await self.db.execute("UPDATE users SET username = NULL WHERE user_id = ?", (user_id,))
 
+    async def llm_preference(self, user_id: int) -> tuple[str, str] | None:
+        row = await self.db.fetchone(
+            "SELECT provider, model FROM llm_preferences WHERE user_id=?", (user_id,)
+        )
+        return (row["provider"], row["model"]) if row else None
+
+    async def set_llm_preference(self, user_id: int, provider: str, model: str) -> None:
+        await self.db.execute(
+            "INSERT INTO llm_preferences(user_id,provider,model) VALUES(?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET provider=excluded.provider,model=excluded.model",
+            (user_id, provider, model),
+        )
+
+    async def reset_llm_preference(self, user_id: int) -> None:
+        await self.db.execute("DELETE FROM llm_preferences WHERE user_id=?", (user_id,))
+
 
 class ChatsRepo:
     def __init__(self, db: Database, default_timezone: str) -> None:

@@ -69,6 +69,8 @@ class ImportProgress:
                 "Обработка может занять до двух минут. Данные уточняются по мере чтения.",
                 "",
             ]
+            if self.data.get("llm_model"):
+                lines.insert(2, "Модель: " + escape(str(self.data["llm_model"])))
             for key, label in FIELD_LABELS.items():
                 value = self.data.get(key)
                 if key in DATE_FIELDS and value:

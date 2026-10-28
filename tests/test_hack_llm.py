@@ -263,3 +263,56 @@ async def test_free_catalog_prefers_compatible_free_models_and_caches_fallback_l
         assert [request.method for request in calls] == ["GET", "POST", "POST"]
     finally:
         await llm.close()
+
+
+async def test_model_catalog_filters_unsupported_and_orders_free_first():
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "a/paid", "supported_parameters": ["structured_outputs"]},
+                    {"id": "b/free:free", "supported_parameters": ["structured_outputs"]},
+                    {"id": "c/no-json", "supported_parameters": []},
+                    {"id": "d/unsafe\nline", "supported_parameters": ["structured_outputs"]},
+                    None,
+                ]
+            },
+        )
+
+    llm = HackathonLLM(
+        "secret",
+        "openrouter/free",
+        "https://openrouter.ai/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert await llm.available_models("openrouter") == [
+            "openrouter/free",
+            "b/free:free",
+            "a/paid",
+        ]
+    finally:
+        await llm.close()
+
+
+async def test_compatible_api_does_not_receive_openrouter_specific_options():
+    def handler(request):
+        body = json.loads(request.content)
+        assert body["model"] == "selected/model"
+        assert "provider" not in body and "reasoning" not in body and "models" not in body
+        return httpx.Response(200, json=response())
+
+    llm = HackathonLLM(
+        "secret",
+        "default/model",
+        "https://compatible.example/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert (
+            await llm.extract("post", "", None, TZ, selection=("openrouter", "selected/model"))
+        )["is_hackathon"]
+        assert llm.model == "default/model"
+    finally:
+        await llm.close()

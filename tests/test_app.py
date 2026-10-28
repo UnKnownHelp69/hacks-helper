@@ -125,3 +125,24 @@ def test_llm_settings(monkeypatch, tmp_path):
         monkeypatch.setenv("LLM_BASE_URL", url)
         with pytest.raises(ConfigError, match="LLM_BASE_URL"):
             load_settings(tmp_path / "missing.env")
+
+
+def test_gigachat_settings_and_secret_repr(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOT_TOKEN", "test")
+    monkeypatch.setenv("LLM_PROVIDER", "gigachat")
+    monkeypatch.setenv("GIGACHAT_CREDENTIALS", "base64-secret")
+    monkeypatch.setenv("GIGACHAT_SCOPE", "GIGACHAT_API_B2B")
+    monkeypatch.setenv("GIGACHAT_MODEL", "GigaChat-Pro")
+    settings = load_settings(tmp_path / "missing.env")
+    assert settings.llm_provider == "gigachat"
+    assert settings.gigachat_scope == "GIGACHAT_API_B2B"
+    assert settings.gigachat_model == "GigaChat-Pro"
+    assert settings.gigachat_credentials == "base64-secret"
+    assert "base64-secret" not in repr(settings)
+    monkeypatch.setenv("LLM_PROVIDER", "unknown")
+    with pytest.raises(ConfigError, match="LLM_PROVIDER"):
+        load_settings(tmp_path / "missing.env")
+    monkeypatch.setenv("LLM_PROVIDER", "gigachat")
+    monkeypatch.setenv("GIGACHAT_SCOPE", "unknown")
+    with pytest.raises(ConfigError, match="GIGACHAT_SCOPE"):
+        load_settings(tmp_path / "missing.env")

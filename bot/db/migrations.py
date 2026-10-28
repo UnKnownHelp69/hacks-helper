@@ -189,6 +189,15 @@ MIGRATIONS: list[str] = [
     """,
 ]
 
+# 4: personal model selection; no existing records or columns are changed.
+MIGRATIONS.append("""
+    CREATE TABLE llm_preferences (
+        user_id INTEGER PRIMARY KEY,
+        provider TEXT NOT NULL CHECK(provider IN ('openrouter', 'gigachat')),
+        model TEXT NOT NULL
+    );
+""")
+
 LATEST_VERSION = len(MIGRATIONS)
 
 

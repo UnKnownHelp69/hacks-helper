@@ -158,6 +158,44 @@ async def test_llm_failure_preserves_deterministic_data(service, monkeypatch):
     assert session.data["import_error"] == "LLM сбой"
 
 
+async def test_personal_model_is_snapshotted_for_all_documents(service, storage, monkeypatch):
+    service.llm.gigachat.configured = True
+    service.llm.configured = True
+    await storage.users.set_llm_preference(USER_ID, "gigachat", "GigaChat-Pro")
+    selections = []
+
+    async def extract(*args, selection, **kwargs):
+        selections.append(selection)
+        # A parallel menu interaction must not change the second document's model.
+        await storage.users.set_llm_preference(USER_ID, "openrouter", "another/model")
+        return {"is_hackathon": True, "follow_urls": ["https://event.example/rules"]}
+
+    monkeypatch.setattr(service.llm, "extract", extract)
+    monkeypatch.setattr(
+        "bot.services.hackathons.fetch_public_page",
+        AsyncMock(
+            return_value=('<h1>Хакатон</h1><a href="/rules">Правила</a>', "https://event.example/")
+        ),
+    )
+    session = await service.import_post(ALLOWED_CHAT, USER_ID, "https://event.example/")
+    assert selections == [("gigachat", "GigaChat-Pro")] * 2
+    assert session.data["llm_model"] == "GigaChat-Pro"
+    assert session.data["llm_provider"] == "gigachat"
+    assert await service.llm_selection(USER_ID) == ("openrouter", "another/model")
+    assert await service.llm_selection(OTHER_ID) == ("openrouter", "openrouter/free")
+
+
+async def test_model_selection_requires_membership_and_catalog_entry(service, storage, monkeypatch):
+    monkeypatch.setattr(service.llm, "available_models", AsyncMock(return_value=["GigaChat"]))
+    with pytest.raises(UserError, match="подтвердить"):
+        await service.select_llm(ALLOWED_CHAT, OTHER_ID, "gigachat", "GigaChat")
+    with pytest.raises(UserError, match="недоступна"):
+        await service.select_llm(ALLOWED_CHAT, USER_ID, "gigachat", "invented")
+    assert await storage.users.llm_preference(USER_ID) is None
+    await service.select_llm(ALLOWED_CHAT, USER_ID, "gigachat", "GigaChat")
+    assert await storage.users.llm_preference(USER_ID) == ("gigachat", "GigaChat")
+
+
 async def test_llm_can_recognize_a_link_without_regex_keyword(service, monkeypatch):
     monkeypatch.setattr(
         "bot.services.hackathons.fetch_public_page",

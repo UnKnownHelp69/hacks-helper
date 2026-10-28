@@ -70,6 +70,11 @@ class Settings:
     llm_api_key: str | None = field(default=None, repr=False)
     llm_model: str = "openrouter/free"
     llm_base_url: str = "https://openrouter.ai/api/v1"
+    llm_provider: str = "openrouter"
+    gigachat_credentials: str | None = field(default=None, repr=False)
+    gigachat_scope: str = "GIGACHAT_API_PERS"
+    gigachat_model: str = "GigaChat"
+    gigachat_ca_bundle_file: str | None = None
     github_poll_interval_minutes: int = 10
     github_in_progress_label: str = "in progress"
     reminder_offsets_minutes: list[int] = field(default_factory=lambda: [1440, 180, 60])
@@ -106,6 +111,12 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         raise ConfigError(f"DEFAULT_TIMEZONE: unknown timezone '{tz_name}'") from exc
 
     log_file_raw = os.getenv("LOG_FILE", "logs/bot.log").strip()
+    llm_provider = os.getenv("LLM_PROVIDER", "openrouter").strip().lower() or "openrouter"
+    if llm_provider not in {"openrouter", "gigachat"}:
+        raise ConfigError("LLM_PROVIDER must be openrouter or gigachat")
+    gigachat_scope = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip()
+    if gigachat_scope not in {"GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP"}:
+        raise ConfigError("GIGACHAT_SCOPE must be GIGACHAT_API_PERS, B2B or CORP")
     llm_base_url = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1").strip().rstrip("/")
     try:
         endpoint = urlsplit(llm_base_url)
@@ -130,6 +141,11 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         llm_api_key=os.getenv("LLM_API_KEY", "").strip() or None,
         llm_model=os.getenv("LLM_MODEL", "openrouter/free").strip() or "openrouter/free",
         llm_base_url=llm_base_url,
+        llm_provider=llm_provider,
+        gigachat_credentials=os.getenv("GIGACHAT_CREDENTIALS", "").strip() or None,
+        gigachat_scope=gigachat_scope,
+        gigachat_model=os.getenv("GIGACHAT_MODEL", "GigaChat").strip() or "GigaChat",
+        gigachat_ca_bundle_file=os.getenv("GIGACHAT_CA_BUNDLE_FILE", "").strip() or None,
         github_poll_interval_minutes=_parse_positive_int(
             os.getenv("GITHUB_POLL_INTERVAL_MINUTES"), "GITHUB_POLL_INTERVAL_MINUTES", 10
         ),

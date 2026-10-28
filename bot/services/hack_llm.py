@@ -1,4 +1,4 @@
-"""Bounded, structured extraction through OpenRouter's Chat Completions API."""
+"""Bounded, validated hackathon extraction through OpenRouter or GigaChat."""
 
 from __future__ import annotations
 
@@ -14,8 +14,10 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from bot.errors import UserError
+from bot.services.gigachat import GigaChatClient
 from bot.services.github import normalize_repo
 from bot.services.hack_import import PageParser, public_url
+from bot.services.llm_http import bounded_json
 
 log = logging.getLogger(__name__)
 
@@ -159,9 +161,26 @@ class HackathonLLM:
         base_url: str,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        default_provider: str = "openrouter",
+        gigachat_credentials: str | None = None,
+        gigachat_scope: str = "GIGACHAT_API_PERS",
+        gigachat_model: str = "GigaChat",
+        gigachat_ca_bundle_file: str | None = None,
+        gigachat_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.configured = bool(api_key)
         self.model = model
+        self.default_provider = default_provider
+        self.gigachat_model = gigachat_model
+        self.gigachat = GigaChatClient(
+            gigachat_credentials,
+            gigachat_scope,
+            gigachat_ca_bundle_file,
+            transport=gigachat_transport,
+        )
+        self.is_openrouter = urlsplit(base_url).hostname == "openrouter.ai"
+        self._catalogs: dict[str, list[dict[str, Any]]] = {}
+        self._catalog_lock = asyncio.Lock()
         self._resolved: dict[str, Any] | None = None
         self._model_lock = asyncio.Lock()
         self._slots = asyncio.Semaphore(2)
@@ -175,16 +194,92 @@ class HackathonLLM:
 
     async def close(self) -> None:
         await self._client.aclose()
+        await self.gigachat.close()
 
-    async def request_model(self) -> dict[str, Any]:
-        if self.model != "openrouter/free":
-            return {"model": self.model, "reasoning": {"effort": "minimal"}}
+    @property
+    def default_selection(self) -> tuple[str, str]:
+        return (
+            self.default_provider,
+            self.gigachat_model if self.default_provider == "gigachat" else self.model,
+        )
+
+    def is_configured(self, provider: str) -> bool:
+        if provider == "openrouter":
+            return self.configured
+        return provider == "gigachat" and self.gigachat.configured
+
+    async def catalog(self, provider: str) -> list[dict[str, Any]]:
+        async with self._catalog_lock:
+            if provider not in self._catalogs:
+                if provider == "gigachat":
+                    payload = await self.gigachat.request("GET", "models", limit=2000000)
+                else:
+                    payload = await bounded_json(self._client, "GET", "models", limit=2000000)
+                models = payload["data"]
+                if not isinstance(models, list):
+                    raise ValueError("Invalid model catalog")
+                self._catalogs[provider] = [
+                    item
+                    for item in models
+                    if isinstance(item, dict)
+                    and isinstance(item.get("id"), str)
+                    and 0 < len(item["id"]) <= 160
+                    and item["id"].isascii()
+                    and not any(char.isspace() or ord(char) < 32 for char in item["id"])
+                ][:1000]
+            return self._catalogs[provider]
+
+    async def available_models(self, provider: str) -> list[str]:
+        if not self.is_configured(provider):
+            variable = "GIGACHAT_CREDENTIALS" if provider == "gigachat" else "LLM_API_KEY"
+            raise UserError(
+                f"Провайдер не настроен. Сохраните {variable} в .env и перезапустите бота"
+            )
+        try:
+            async with asyncio.timeout(25):
+                catalog = await self.catalog(provider)
+            ids = [
+                item["id"]
+                for item in catalog
+                if (provider == "gigachat" and item["id"].startswith("GigaChat"))
+                or (
+                    provider == "openrouter"
+                    and (
+                        not self.is_openrouter
+                        or "structured_outputs" in (item.get("supported_parameters") or [])
+                    )
+                )
+            ]
+            default = self.gigachat_model if provider == "gigachat" else self.model
+            ids.sort(key=lambda name: (not name.endswith(":free"), name))
+            return list(dict.fromkeys([default, *ids]))
+        except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError, OverflowError):
+            raise UserError(
+                "Не удалось загрузить модели. Проверьте ключ, подключение и сертификаты провайдера"
+            ) from None
+
+    async def request_model(self, model: str | None = None) -> dict[str, Any]:
+        model = model or self.model
+        if not self.is_openrouter:
+            return {"model": model}
+        if model != "openrouter/free":
+            metadata = next(
+                (item for item in self._catalogs.get("openrouter", []) if item["id"] == model),
+                None,
+            )
+            if metadata and "reasoning" not in (metadata.get("supported_parameters") or []):
+                return {"model": model}
+            reasoning = (metadata or {}).get("reasoning") or {}
+            return {
+                "model": model,
+                "reasoning": {
+                    "effort": "none" if reasoning.get("mandatory") is False else "minimal"
+                },
+            }
         async with self._model_lock:
             if self._resolved is not None:
                 return self._resolved
-            response = await self._client.get("models")
-            response.raise_for_status()
-            models = response.json()["data"]
+            models = await self.catalog("openrouter")
 
             def parameters(model: dict[str, Any]) -> list:
                 value = model.get("supported_parameters")
@@ -229,8 +324,10 @@ class HackathonLLM:
         *,
         previous_pages: list[dict[str, Any]] | None = None,
         current: dict[str, Any] | None = None,
+        selection: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
-        if not self.configured:
+        provider, model = selection or self.default_selection
+        if not self.is_configured(provider):
             return {}
         if self._slots.locked():
             raise UserError(
@@ -250,16 +347,44 @@ class HackathonLLM:
         }
         try:
             async with self._slots, asyncio.timeout(120):
-                model_options = await self.request_model()
-                async with self._client.stream(
-                    "POST",
-                    "chat/completions",
-                    json={
+                messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+                ]
+                if provider == "gigachat":
+                    payload = await self.gigachat.request(
+                        "POST",
+                        "chat/completions",
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "max_tokens": 8000,
+                            "function_call": {"name": "extract_hackathon"},
+                            "functions": [
+                                {
+                                    "name": "extract_hackathon",
+                                    "description": "Return the extracted hackathon facts",
+                                    "parameters": Extraction.model_json_schema(),
+                                }
+                            ],
+                        },
+                    )
+                    choice = payload["choices"][0]
+                    call = choice["message"]["function_call"]
+                    if (
+                        choice["finish_reason"] != "function_call"
+                        or call["name"] != "extract_hackathon"
+                    ):
+                        raise ValueError("Incomplete function response")
+                    arguments = call["arguments"]
+                    result = Extraction.model_validate_json(
+                        arguments if isinstance(arguments, str) else json.dumps(arguments)
+                    )
+                else:
+                    model_options = await self.request_model(model)
+                    request = {
                         **model_options,
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-                        ],
+                        "messages": messages,
                         "response_format": {
                             "type": "json_schema",
                             "json_schema": {
@@ -268,31 +393,27 @@ class HackathonLLM:
                                 "schema": Extraction.model_json_schema(),
                             },
                         },
-                        "provider": {"require_parameters": True, "sort": "latency"},
                         "max_tokens": 8000,
-                    },
-                ) as response:
-                    response.raise_for_status()
-                    body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        body.extend(chunk)
-                        if len(body) > 128000:
-                            raise ValueError("Response too large")
-                payload = json.loads(body)
-                choice = payload["choices"][0]
-                if choice["finish_reason"] != "stop":
-                    raise ValueError("Incomplete response")
-                result = Extraction.model_validate_json(choice["message"]["content"])
+                    }
+                    if self.is_openrouter:
+                        request["provider"] = {"require_parameters": True, "sort": "latency"}
+                    payload = await bounded_json(
+                        self._client, "POST", "chat/completions", json=request
+                    )
+                    choice = payload["choices"][0]
+                    if choice["finish_reason"] != "stop":
+                        raise ValueError("Incomplete response")
+                    result = Extraction.model_validate_json(choice["message"]["content"])
                 return result.model_dump(exclude_none=True)
         except (httpx.TimeoutException, TimeoutError):
-            log.warning("Hackathon LLM timed out (model=%s)", self.model)
+            log.warning("Hackathon LLM timed out (provider=%s, model=%s)", provider, model)
             raise UserError(
                 "LLM не ответила за две минуты. Сохранены уже найденные данные; "
                 "попробуйте импорт ещё раз или дополните черновик вручную"
             ) from None
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
-            log.warning("Hackathon LLM HTTP %s (model=%s)", status, self.model)
+            log.warning("Hackathon LLM HTTP %s (provider=%s, model=%s)", status, provider, model)
             raise UserError(
                 f"LLM API вернул HTTP {status}. Сохранён результат обычного парсера; "
                 "проверьте ключ, лимиты и поддержку модели"
@@ -304,9 +425,14 @@ class HackathonLLM:
             KeyError,
             IndexError,
             TypeError,
+            OverflowError,
             RecursionError,
         ):
-            log.warning("Hackathon LLM returned no usable extraction (model=%s)", self.model)
+            log.warning(
+                "Hackathon LLM returned no usable extraction (provider=%s, model=%s)",
+                provider,
+                model,
+            )
             # Provider bodies/prompts/headers may contain secrets: never log or show them.
             raise UserError(
                 "LLM не смогла заполнить данные. Сохранён результат обычного парсера; "
