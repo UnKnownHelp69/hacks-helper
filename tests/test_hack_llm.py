@@ -25,12 +25,28 @@ def response(data=None, **overrides):
     return {"choices": [choice]}
 
 
-def client(handler, key="test-secret"):
+def client(handler, key="test-secret", *, mandatory=False):
+    def route(request):
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "test/extraction:free",
+                            "supported_parameters": ["structured_outputs", "reasoning"],
+                            "reasoning": {"mandatory": mandatory},
+                        }
+                    ]
+                },
+            )
+        return handler(request)
+
     return HackathonLLM(
         key,
         "openrouter/free",
         "https://openrouter.ai/api/v1",
-        transport=httpx.MockTransport(handler),
+        transport=httpx.MockTransport(route),
     )
 
 
@@ -44,7 +60,7 @@ async def test_structured_request_and_normalized_dates():
         schema = body["response_format"]["json_schema"]
         assert schema["strict"] and not schema["schema"]["additionalProperties"]
         assert set(schema["schema"]["required"]) == set(Extraction.model_fields)
-        assert body["max_tokens"] == 4000
+        assert body["max_tokens"] == 8000
         context = json.loads(body["messages"][1]["content"])
         assert context["timezone"] == TZ.key
         assert context["page"]["links"] == [
@@ -171,3 +187,79 @@ def test_context_is_bounded_and_excludes_scripts_and_local_links():
     assert len(context["text"]) == 30000
     assert "secret script" not in json.dumps(context)
     assert context["links"] == [{"url": "https://event.example/rules", "label": "Rules"}]
+
+
+async def test_free_router_accepts_endpoint_with_mandatory_reasoning():
+    requests = []
+
+    def mandatory_endpoint(request):
+        requests.append(request)
+        body = json.loads(request.content)
+        assert body["max_tokens"] >= 8000  # Reasoning tokens share this output budget.
+        reasoning = body.get("reasoning", {})
+        if reasoning.get("effort") == "none" or reasoning.get("enabled") is False:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": (
+                            "Reasoning is mandatory for this endpoint and cannot be disabled."
+                        )
+                    }
+                },
+            )
+        return httpx.Response(200, json=response(fields(title="ИИкузница", team_min=1)))
+
+    llm = client(mandatory_endpoint, mandatory=True)
+    try:
+        result = await llm.extract(
+            "https://иикузница.рф", "<h1>Хакатон ИИкузница</h1>", "https://иикузница.рф/", TZ
+        )
+        assert result["title"] == "ИИкузница" and result["team_min"] == 1
+        assert len(requests) == 1
+    finally:
+        await llm.close()
+
+
+async def test_free_catalog_prefers_compatible_free_models_and_caches_fallback_list():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if request.method == "GET":
+
+            def model(name, mandatory):
+                return {
+                    "id": name,
+                    "supported_parameters": ["structured_outputs", "reasoning"],
+                    "reasoning": {"mandatory": mandatory},
+                }
+
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        model("mandatory:free", True),
+                        model("paid", False),
+                        model("first:free", False),
+                        model("second:free", False),
+                    ]
+                },
+            )
+        body = json.loads(request.content)
+        assert body["models"] == ["first:free", "second:free"]
+        assert body["reasoning"] == {"effort": "none"}
+        return httpx.Response(200, json=response())
+
+    llm = HackathonLLM(
+        "test-secret",
+        "openrouter/free",
+        "https://openrouter.ai/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        for _ in range(2):
+            assert (await llm.extract("post", "", None, TZ))["is_hackathon"]
+        assert [request.method for request in calls] == ["GET", "POST", "POST"]
+    finally:
+        await llm.close()

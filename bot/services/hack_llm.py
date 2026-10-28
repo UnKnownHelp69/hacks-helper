@@ -162,6 +162,8 @@ class HackathonLLM:
     ) -> None:
         self.configured = bool(api_key)
         self.model = model
+        self._resolved: dict[str, Any] | None = None
+        self._model_lock = asyncio.Lock()
         self._slots = asyncio.Semaphore(2)
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/") + "/",
@@ -173,6 +175,50 @@ class HackathonLLM:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def request_model(self) -> dict[str, Any]:
+        if self.model != "openrouter/free":
+            return {"model": self.model, "reasoning": {"effort": "minimal"}}
+        async with self._model_lock:
+            if self._resolved is not None:
+                return self._resolved
+            response = await self._client.get("models")
+            response.raise_for_status()
+            models = response.json()["data"]
+
+            def parameters(model: dict[str, Any]) -> list:
+                value = model.get("supported_parameters")
+                return value if isinstance(value, list) else []
+
+            def mandatory(model: dict[str, Any]) -> bool | None:
+                value = model.get("reasoning")
+                return value.get("mandatory") if isinstance(value, dict) else None
+
+            candidates = [
+                model
+                for model in models
+                if isinstance(model, dict)
+                and isinstance(model.get("id"), str)
+                and model["id"].endswith(":free")
+                and "structured_outputs" in parameters(model)
+            ]
+            if not candidates:
+                raise UserError("В OpenRouter нет доступной бесплатной модели с JSON Schema")
+            optional = [
+                model
+                for model in candidates
+                if mandatory(model) is False and "reasoning" in parameters(model)
+            ]
+            plain = [model for model in candidates if "reasoning" not in parameters(model)]
+            selected = (optional or plain or candidates)[:3]
+            options: dict[str, Any] = {"models": [model["id"] for model in selected]}
+            if optional or not plain:
+                options["reasoning"] = {"effort": "none" if optional else "minimal"}
+            # Native model fallbacks handle rate-limited/down providers in one API call.
+            # Every candidate is :free, so fallback cannot silently spend a paid balance.
+            self._resolved = options
+            log.info("Selected free extraction models: %s", ", ".join(options["models"]))
+            return options
 
     async def extract(
         self,
@@ -204,11 +250,12 @@ class HackathonLLM:
         }
         try:
             async with self._slots, asyncio.timeout(120):
+                model_options = await self.request_model()
                 async with self._client.stream(
                     "POST",
                     "chat/completions",
                     json={
-                        "model": self.model,
+                        **model_options,
                         "messages": [
                             {"role": "system", "content": SYSTEM_PROMPT},
                             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
@@ -222,10 +269,7 @@ class HackathonLLM:
                             },
                         },
                         "provider": {"require_parameters": True, "sort": "latency"},
-                        # Extraction needs facts, not a long reasoning pass that can exhaust
-                        # the output budget or deadline before producing any JSON.
-                        "reasoning": {"effort": "none"},
-                        "max_tokens": 4000,
+                        "max_tokens": 8000,
                     },
                 ) as response:
                     response.raise_for_status()
