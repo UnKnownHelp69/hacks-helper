@@ -263,7 +263,7 @@ def private_panel(app, actor=ALICE, chat_id=ALLOWED_CHAT):
         and message.reply_markup
         and (chat_id > 0 or (message.receiver_user and message.receiver_user.id == actor.id))
         and any(
-            item.callback_data and item.callback_data.startswith("hk:")
+            item.callback_data and item.callback_data.startswith(("hk:", "me:"))
             for row in message.reply_markup.inline_keyboard
             for item in row
         )
@@ -347,6 +347,39 @@ async def test_personal_profile_is_delivered_only_to_requesting_user(app):
     assert f"id: {USER_ID}" in await shown(app, ALICE)
     await send(app, "/me", ADMIN)
     assert f"id: {ADMIN_ID}" in await shown(app, ADMIN)
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+async def test_settings_are_in_me_and_return_to_profile(app, chat_id):
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    await app["storage"].users.set_llm_preference(USER_ID, "gigachat", "GigaChat-Pro")
+    await send(app, "/hack", ALICE, chat_id=chat_id)
+    panel = private_panel(app, chat_id=chat_id)
+    assert all(
+        "Модель" not in item.text for row in panel.reply_markup.inline_keyboard for item in row
+    )
+    await send(app, "/me", ALICE, chat_id=chat_id)
+    assert "Профиль и настройки" in app["session"].last_text()
+    assert "GigaChat-Pro" in app["session"].last_text()
+    panel = private_panel(app, chat_id=chat_id)
+    assert panel.reply_markup.inline_keyboard[0][0].callback_data.startswith("me:")
+    await click(app, "Модель нейросети", chat_id=chat_id)
+    await click(app, "К профилю", chat_id=chat_id)
+    assert f"id: {USER_ID}" in app["session"].last_text()
+    assert await app["storage"].users.llm_preference(USER_ID) == ("gigachat", "GigaChat-Pro")
+
+
+async def test_old_hack_settings_buttons_redirect_without_changing_preference(app):
+    await send(app, "/hack", ALICE)
+    session = await app["storage"].workflow.new_session(
+        USER_ID,
+        ALLOWED_CHAT,
+        "llm",
+        {"_llm_provider": "gigachat", "_llm_models": ["GigaChat"]},
+    )
+    await press(app, f"hk:{session.token}:{session.revision}:llm_pick:0", ALICE)
+    assert "/me" in app["session"].last_text()
+    assert await app["storage"].users.llm_preference(USER_ID) is None
 
 
 async def test_hack_menu_lists_cards_as_personal_buttons(app):
@@ -560,7 +593,7 @@ async def test_model_menu_is_personal_owner_bound_paginated_and_persistent(app, 
     models = ["GigaChat", *[f"GigaChat-{i}" for i in range(10)]]
     monkeypatch.setattr(app["ctx"].hacks.llm, "available_models", AsyncMock(return_value=models))
     bob = tg_user(3003, "bob_user", "Bob")
-    await send(app, "/hack", ALICE, ephemeral=True)
+    await send(app, "/me", ALICE, ephemeral=True)
     await click(app, "Модель нейросети")
     await click(app, "GigaChat · Сбер")
     panel = private_panel(app)
@@ -569,7 +602,7 @@ async def test_model_menu_is_personal_owner_bound_paginated_and_persistent(app, 
     assert await app["storage"].users.llm_preference(bob.id) is None
     await press(app, item.callback_data, ALICE, source=panel)
     assert await app["storage"].users.llm_preference(USER_ID) == ("gigachat", "GigaChat")
-    await send(app, "/hack", ALICE, ephemeral=True)
+    await send(app, "/me", ALICE, ephemeral=True)
     await click(app, "Модель нейросети")
     assert "GigaChat" in app["session"].last_text()
     await click(app, "GigaChat · Сбер")
@@ -588,7 +621,7 @@ async def test_model_menu_is_personal_owner_bound_paginated_and_persistent(app, 
 
 
 async def test_gigachat_menu_without_key_gives_private_setup_instructions(app):
-    await send(app, "/hack", ALICE, ephemeral=True)
+    await send(app, "/me", ALICE, ephemeral=True)
     await click(app, "Модель нейросети")
     await click(app, "GigaChat · Сбер")
     assert "GIGACHAT_CREDENTIALS" in app["session"].last_text()

@@ -85,10 +85,12 @@ class HackathonService:
         await self.require_access(hack.chat_id, user_id)
         return hack
 
-    async def session(self, user_id: int, token: str) -> HackSession:
+    async def session(self, user_id: int, token: str, *, command: str = "/hack") -> HackSession:
         session = await self.storage.workflow.session(user_id, token)
         if session is None:
-            raise UserError("Этот диалог устарел или открыт другим пользователем. Откройте /hack")
+            raise UserError(
+                f"Этот диалог устарел или открыт другим пользователем. Откройте {command}"
+            )
         await self.require_access(session.chat_id, user_id)
         return session
 
