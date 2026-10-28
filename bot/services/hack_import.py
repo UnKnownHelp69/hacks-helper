@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import os
 import re
 import socket
+import sys
 from contextlib import suppress
 from datetime import UTC, datetime
+from html import escape
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -135,6 +138,7 @@ async def fetch_public_page(url: str) -> tuple[str, str]:
                         "text/plain",
                         "application/json",
                         "application/ld+json",
+                        "application/pdf",
                     }:
                         raise UserError("По ссылке нужна веб-страница с описанием хакатона")
                     data = bytearray()
@@ -142,12 +146,38 @@ async def fetch_public_page(url: str) -> tuple[str, str]:
                         data.extend(chunk)
                         if len(data) > 1_000_000:
                             raise UserError("Страница слишком большая; заполните данные вручную")
+                    if response.content_type == "application/pdf":
+                        return "<pre>" + escape(await pdf_text(bytes(data))) + "</pre>", current
                     return data.decode(response.charset or "utf-8", errors="replace"), current
     except (aiohttp.ClientError, OSError, TimeoutError, LookupError):
         raise UserError("Не удалось прочитать сайт. Можно заполнить данные вручную") from None
     finally:
         await resolver.close()
     raise UserError("Слишком много перенаправлений; заполните данные вручную")
+
+
+async def pdf_text(data: bytes) -> str:
+    """Keep untrusted PDF parsing outside the bot process, with a hard deadline."""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "bot.services.pdf_text",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        env={key: value for key, value in os.environ.items() if key in {"SYSTEMROOT", "WINDIR"}},
+    )
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(data), timeout=6)
+        if process.returncode or not output.strip():
+            raise UserError("Не удалось извлечь текст PDF; возможно, это скан")
+        return output.decode("utf-8")
+    except TimeoutError:
+        raise UserError("PDF слишком сложный для автоматического чтения") from None
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
 
 
 class PageParser(HTMLParser):

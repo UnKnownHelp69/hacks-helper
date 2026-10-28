@@ -12,7 +12,9 @@ TZ = ZoneInfo("Europe/Moscow")
 
 def fields(**overrides):
     result = dict.fromkeys(Extraction.model_fields)
-    result.update(is_hackathon=True, title="AI Hack", team_min=2, team_max=5, checkpoints=[])
+    result.update(
+        is_hackathon=True, title="AI Hack", team_min=2, team_max=5, checkpoints=[], follow_urls=[]
+    )
     result.update(overrides)
     return result
 
@@ -125,7 +127,7 @@ async def test_timeout_is_explained_without_exposing_exception(caplog):
 
     llm = client(timeout)
     try:
-        with pytest.raises(UserError, match="40 секунд") as error:
+        with pytest.raises(UserError, match="две минуты") as error:
             await llm.extract("post", "", None, TZ)
         assert "secret" not in str(error.value) + caplog.text
         assert "timed out" in caplog.text
@@ -166,6 +168,6 @@ def test_context_is_bounded_and_excludes_scripts_and_local_links():
         + "</p>",
         "https://event.example/",
     )
-    assert len(context["text"]) == 50000
+    assert len(context["text"]) == 30000
     assert "secret script" not in json.dumps(context)
     assert context["links"] == [{"url": "https://event.example/rules", "label": "Rules"}]

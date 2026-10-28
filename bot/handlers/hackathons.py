@@ -6,6 +6,7 @@ from datetime import datetime
 from html import escape
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -20,9 +21,10 @@ from bot.db.database import utcnow
 from bot.db.models import HACK_ACTIVE, HACK_FINISHED, HackSession
 from bot.errors import UserError
 from bot.handlers.base import usage
+from bot.handlers.import_progress import ImportProgress
 from bot.handlers.render import hackathon_card
 from bot.middlewares.security import command_name
-from bot.respond import personal_options, personal_reply
+from bot.respond import edit_personal_reply, personal_options, personal_reply
 from bot.services.args import parse_command
 from bot.services.hack_data import (
     DATE_FIELDS,
@@ -95,7 +97,12 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
 
 
 async def preview(
-    event: Event, ctx: AppContext, session: HackSession, error: str | None = None
+    event: Event,
+    ctx: AppContext,
+    session: HackSession,
+    error: str | None = None,
+    *,
+    target: Message | None = None,
 ) -> None:
     tz = await ctx.zone(session.chat_id)
     lines = ["📝 <b>Проверьте данные хакатона</b>"]
@@ -113,6 +120,8 @@ async def preview(
     lines.append(f"Часовой пояс: {escape(tz.key)}")
     checkpoints = session.data.get("checkpoints", [])
     lines.append(f"Чекпоинты: {len(checkpoints)}")
+    if session.data.get("import_sources"):
+        lines.append(f"Изучено источников: {len(session.data['import_sources'])}")
     valid = True
     try:
         validate_hack(session.data)
@@ -137,7 +146,32 @@ async def preview(
         )
         rows.append([button(session, label, "publish")])
     rows.append([button(session, "В меню", "menu"), button(session, "Отменить черновик", "cancel")])
-    await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows))
+    if target is not None and isinstance(event, Message):
+        try:
+            await edit_personal_reply(event, target, "\n".join(lines), reply_markup=keyboard(rows))
+        except TelegramAPIError:
+            # An expired progress panel may be replaced only with another personal message.
+            await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows), edit=False)
+    else:
+        await personal_reply(event, "\n".join(lines), reply_markup=keyboard(rows))
+
+
+async def import_message(
+    message: Message, ctx: AppContext, raw: str, *, explicit: bool = False
+) -> HackSession | None:
+    async with ImportProgress(message, await ctx.zone(message.chat.id)) as progress:
+        imported = await ctx.hacks.import_post(
+            message.chat.id,
+            message.from_user.id,
+            raw,
+            explicit=explicit,
+            on_progress=progress.update,
+        )
+    if imported is not None:
+        await preview(message, ctx, imported, target=progress.panel)
+    elif progress.panel is not None:
+        await edit_personal_reply(message, progress.panel, "Хакатон в сообщении не найден")
+    return imported
 
 
 async def prompt(
@@ -565,16 +599,13 @@ async def hack_input(message: Message, ctx: AppContext) -> None:
         try:
             tz = await ctx.zone(session.chat_id)
             if field == "import":
-                imported = await ctx.hacks.import_post(
-                    session.chat_id, actor.id, raw, explicit=True
-                )
+                imported = await import_message(message, ctx, raw, explicit=True)
                 if imported is None:
                     raise UserError(
                         "Хакатон не распознан. Пришлите пост с описанием или ссылку на его страницу"
                     )
                 session.step = "cancelled"
                 await ctx.storage.workflow.save_session(session)
-                await preview(message, ctx, imported)
                 return
             if field == "checkpoint":
                 if len(session.data.get("checkpoints", [])) >= 20:
@@ -604,6 +635,4 @@ async def hack_input(message: Message, ctx: AppContext) -> None:
     for entity in [*(message.entities or []), *(message.caption_entities or [])]:
         if entity.type == "text_link" and entity.url:
             raw += "\n" + entity.url
-    imported = await ctx.hacks.import_post(message.chat.id, actor.id, raw)
-    if imported is not None:
-        await preview(message, ctx, imported)
+    await import_message(message, ctx, raw)

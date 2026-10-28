@@ -126,14 +126,20 @@ async def test_dns_rebinding_and_mixed_private_records_are_rejected(monkeypatch)
         await resolver.close()
 
 
-@pytest.mark.parametrize("mode", ["private_redirect", "oversized", "non_html"])
+@pytest.mark.parametrize("mode", ["private_redirect", "oversized", "non_html", "pdf"])
 async def test_fetch_rejects_unsafe_redirects_and_unbounded_or_non_page_content(monkeypatch, mode):
     requests = []
 
     class Response:
         status = 302 if mode == "private_redirect" else 200
         headers = {"Location": "http://127.0.0.1/secret"} if mode == "private_redirect" else {}
-        content_type = "application/pdf" if mode == "non_html" else "text/html"
+        content_type = (
+            "image/png"
+            if mode == "non_html"
+            else "application/pdf"
+            if mode == "pdf"
+            else "text/html"
+        )
         charset = "utf-8"
 
         @property
@@ -141,7 +147,7 @@ async def test_fetch_rejects_unsafe_redirects_and_unbounded_or_non_page_content(
             return self
 
         async def iter_chunked(self, size):
-            yield b"a" * 1_000_001
+            yield b"fake-pdf" if mode == "pdf" else b"a" * 1_000_001
 
         async def __aenter__(self):
             return self
@@ -164,6 +170,15 @@ async def test_fetch_rejects_unsafe_redirects_and_unbounded_or_non_page_content(
             return Response()
 
     monkeypatch.setattr("bot.services.hack_import.aiohttp.ClientSession", Session)
-    with pytest.raises(UserError):
-        await fetch_public_page("https://hack.example/")
+    if mode == "pdf":
+        from unittest.mock import AsyncMock
+
+        parser = AsyncMock(return_value="Хакатон <script>текст</script>")
+        monkeypatch.setattr("bot.services.hack_import.pdf_text", parser)
+        html, url = await fetch_public_page("https://hack.example/")
+        assert "&lt;script&gt;" in html and url == "https://hack.example/"
+        parser.assert_awaited_once_with(b"fake-pdf")
+    else:
+        with pytest.raises(UserError):
+            await fetch_public_page("https://hack.example/")
     assert requests == ["https://hack.example/"]

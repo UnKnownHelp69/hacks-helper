@@ -696,3 +696,101 @@ async def test_personal_delivery_failure_never_falls_back_to_public_message(app,
     await send(app, "/help", ALICE)
     sends = [method for method in app["session"].requests if isinstance(method, SendMessage)]
     assert sends and all(method.ephemeral_message_parameters for method in sends)
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+async def test_import_progress_stays_personal_and_fills_fields_before_completion(
+    app,
+    monkeypatch,
+    chat_id,
+):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    clock = itertools.count(0, 2)
+    monkeypatch.setattr("bot.handlers.import_progress.monotonic", lambda: next(clock))
+
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    app["ctx"].hacks.llm.configured = True
+    root, rules = "https://hack.example/event", "https://hack.example/rules"
+
+    async def fetch(url):
+        return (
+            '<h1>Хакатон</h1><a href="/rules">Правила</a>'
+            if url == root
+            else "<p>Правила хакатона</p>",
+            url,
+        )
+
+    monkeypatch.setattr("bot.services.hackathons.fetch_public_page", fetch)
+    main_entered, main_release = asyncio.Event(), asyncio.Event()
+    rules_entered, rules_release = asyncio.Event(), asyncio.Event()
+
+    async def extract(post, html, url, tz, **kwargs):
+        if url == root:
+            main_entered.set()
+            await main_release.wait()
+            return {
+                "title": "Хакатон из LLM",
+                "is_hackathon": True,
+                "team_max": 5,
+                "registration_end": "2026-12-01T20:59:00+00:00",
+                "start_at": "2026-12-05T07:00:00+00:00",
+                "end_at": "2026-12-07T15:00:00+00:00",
+                "follow_urls": [rules],
+            }
+        rules_entered.set()
+        await rules_release.wait()
+        return {"team_min": 2, "follow_urls": []}
+
+    monkeypatch.setattr(app["ctx"].hacks.llm, "extract", AsyncMock(side_effect=extract))
+    job = asyncio.create_task(send(app, root, ALICE, chat_id))
+    try:
+        await asyncio.wait_for(main_entered.wait(), timeout=1)
+        panel = app["session"].messages[-1]
+        assert "Изучаю хакатон" in panel.text and "Нейросеть извлекает" in panel.text
+        assert not panel.reply_markup
+        initial_id = panel.ephemeral_message_id if chat_id < 0 else panel.message_id
+        main_release.set()
+        await asyncio.wait_for(rules_entered.wait(), timeout=1)
+        partial = app["session"].messages[-1]
+        assert "Максимум в команде:</b> 5" in partial.text
+        assert "Минимум в команде:</b> ищу" in partial.text
+        assert await app["storage"].hackathons.list(chat_id) == []
+        rules_release.set()
+        await job
+        complete = private_panel(app, ALICE, chat_id)
+        assert "Проверьте данные" in complete.text
+        assert "Минимум в команде:</b> 2" in complete.text
+        assert (complete.ephemeral_message_id if chat_id < 0 else complete.message_id) == initial_id
+        sends = [m for m in app["session"].requests if isinstance(m, SendMessage)]
+        assert len(sends) == 1
+        if chat_id < 0:
+            assert sends[0].ephemeral_message_parameters.receiver_user_id == USER_ID
+            edits = [m for m in app["session"].requests if isinstance(m, EditEphemeralMessageText)]
+            assert edits and all(m.receiver_user_id == USER_ID for m in edits)
+            assert not any(isinstance(m, EditMessageText) for m in app["session"].requests)
+        assert await app["storage"].hackathons.list(chat_id) == []
+    finally:
+        main_release.set()
+        rules_release.set()
+        await job
+
+
+async def test_expired_import_panel_is_replaced_only_with_personal_draft(app, monkeypatch):
+    original = app["session"].make_request
+
+    async def expired(bot, method, timeout=None):
+        if isinstance(method, EditEphemeralMessageText):
+            app["session"].requests.append(method)
+            raise TelegramBadRequest(method=method, message="Ephemeral message expired")
+        return await original(bot, method, timeout)
+
+    monkeypatch.setattr(app["session"], "make_request", expired)
+    await send(app, "Хакатон без дат", ALICE)
+    panel = private_panel(app)
+    assert "Проверьте данные" in panel.text
+    assert await app["storage"].workflow.drafts(USER_ID, ALLOWED_CHAT)
+    sends = [method for method in app["session"].requests if isinstance(method, SendMessage)]
+    assert sends and all(method.ephemeral_message_parameters for method in sends)
+    assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []

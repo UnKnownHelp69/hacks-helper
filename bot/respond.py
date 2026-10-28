@@ -132,6 +132,50 @@ async def reply(message: Message, text: str) -> None:
     await personal_reply(message, text)
 
 
+async def edit_personal_reply(
+    event: Message,
+    sent: Message,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> Message | bool:
+    """Edit a bot-owned progress panel, retaining the original personal recipient."""
+    options = personal_options(event)
+    if sent.chat.id != event.chat.id:
+        raise UserError("Личное сообщение относится к другому чату")
+    if event.chat.type in {"group", "supergroup"}:
+        if (
+            sent.ephemeral_message_id is None
+            or sent.receiver_user is None
+            or sent.receiver_user.id != event.from_user.id
+        ):
+            raise UserError("Это личное сообщение другого пользователя")
+        method = event.bot.edit_ephemeral_message_text(
+            chat_id=event.chat.id,
+            receiver_user_id=event.from_user.id,
+            ephemeral_message_id=sent.ephemeral_message_id,
+            text=text,
+            parse_mode="HTML",
+            link_preview_options=NO_PREVIEW,
+            reply_markup=reply_markup,
+        )
+    else:
+        method = event.bot.edit_message_text(
+            chat_id=options["chat_id"],
+            message_id=sent.message_id,
+            text=text,
+            parse_mode="HTML",
+            link_preview_options=NO_PREVIEW,
+            reply_markup=reply_markup,
+        )
+    try:
+        return await method
+    except TelegramBadRequest as exc:
+        if "not modified" in exc.message.lower():
+            return True
+        raise
+
+
 async def respond(
     message: Message, text: str, ctx: AppContext, *, personal: str | None = None
 ) -> None:
