@@ -54,6 +54,17 @@ async def test_votes_form_team_once_without_admin_permissions(storage):
     assert (await storage.workflow.teams(hack_id))[0].members == [1, 2, 3, 4]
 
 
+async def test_legacy_minimum_does_not_delay_team_creation_notice(storage):
+    session, fields = await draft(storage)
+    fields["team_min"] = 3
+    hack_id = await storage.workflow.save_hack(session, fields)
+    await storage.workflow.vote(hack_id, USER_ID, "yes")
+    notices = await storage.workflow.pending_notices()
+    assert len(notices) == 1 and "создана" in notices[0]["text"]
+    await storage.workflow.vote(hack_id, USER_ID + 1, "yes")
+    assert len(await storage.workflow.pending_notices()) == 1
+
+
 async def test_new_team_recruits_and_switching_vote_removes_membership(storage):
     session, fields = await draft(storage)
     hack_id = await storage.workflow.save_hack(session, fields)

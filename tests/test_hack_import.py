@@ -29,7 +29,7 @@ def test_extract_russian_post_dates_limits_and_links():
     assert result["title"] == "Хакатон нашей команды"
     assert result["start_at"] == "2026-11-05T07:00:00+00:00"
     assert result["end_at"] == "2026-11-07T15:00:00+00:00"
-    assert (result["team_min"], result["team_max"]) == (2, 4)
+    assert result["team_max"] == 4 and "team_min" not in result
     assert result["repo"] == "team/solution"
     assert result["org_chat_url"] == "https://t.me/organizers"
     assert result["checkpoints"][0]["at"] == "2026-11-06T09:00:00+00:00"
@@ -62,7 +62,7 @@ def test_russian_date_range_and_invalid_deep_metadata():
     result = extract_post("Хакатон команды\nПройдёт 3–5 ноября 2026\nКоманды: 2–4 человека", MSK)
     assert result["start_at"] == "2026-11-02T21:00:00+00:00"
     assert result["end_at"] == "2026-11-05T20:59:00+00:00"
-    assert result["team_min"] == 2
+    assert result["team_max"] == 4 and "team_min" not in result
     html = (
         '<h1>Хакатон</h1><script type="application/ld+json">'
         + "[" * 2000

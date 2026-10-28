@@ -198,20 +198,16 @@ class HackWorkflowRepo:
         )
 
     async def _formed(self, conn, hack, team_id: int) -> None:
-        row = await _one(
-            conn, "SELECT COUNT(*) AS n FROM hack_team_members WHERE team_id=?", (team_id,)
+        team = await _one(conn, "SELECT name FROM hack_teams WHERE id=?", (team_id,))
+        await conn.execute(
+            "INSERT OR IGNORE INTO hack_notices(event_key,hackathon_id,text) VALUES(?,?,?)",
+            (
+                f"team:{team_id}:formed",
+                hack["id"],
+                f"👥 {escape(team['name'])} для <b>{escape(hack['title'] or hack['slug'])}</b> "
+                "создана. Состав — в карточке хакатона.",
+            ),
         )
-        if row["n"] >= hack["team_min"]:
-            team = await _one(conn, "SELECT name FROM hack_teams WHERE id=?", (team_id,))
-            await conn.execute(
-                "INSERT OR IGNORE INTO hack_notices(event_key,hackathon_id,text) VALUES(?,?,?)",
-                (
-                    f"team:{team_id}:formed",
-                    hack["id"],
-                    f"👥 {escape(team['name'])} для <b>{escape(hack['title'] or hack['slug'])}</b> "
-                    f"сформирована: {row['n']} участников. Состав — в карточке хакатона.",
-                ),
-            )
 
     async def _new_team(self, conn, hack_id: int) -> int:
         row = await _one(

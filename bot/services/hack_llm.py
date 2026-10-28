@@ -50,7 +50,6 @@ class Extraction(BaseModel):
     registration_end: str | None
     start_at: str | None
     end_at: str | None
-    team_min: int | None = Field(ge=1, le=100)
     team_max: int | None = Field(ge=1, le=100)
     site_url: str | None
     repo: str | None
@@ -162,7 +161,7 @@ source_url must be an actual page/previous_pages URL, or null for a quote from t
 Quotes MUST come from those sources, NEVER from current. Return null when there is no quote.
 Do not infer specific hours from a date-only source: use start 00:00 and deadline/end 23:59
 in the supplied chat timezone.
-team_min/team_max are people per team; a maximum alone does not establish the minimum.
+team_max is the maximum number of people per team; do not extract a minimum team size.
 repo is the participants' solution GitHub repository (owner/name), not an organizer's example.
 org_chat_url must be an explicitly identified hackathon group/channel for participants or
 organizer contact. A registration bot or the company's general social page is not this chat.

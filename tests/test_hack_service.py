@@ -98,12 +98,14 @@ def test_validation_rejects_missing_dates_and_invalid_team_bounds():
         "registration_end": now.isoformat(),
         "start_at": (now + timedelta(days=1)).isoformat(),
         "end_at": (now + timedelta(days=2)).isoformat(),
-        "team_min": 5,
-        "team_max": 2,
+        "team_max": 0,
     }
     with pytest.raises(UserError, match="Размер команды"):
         validate_hack(data)
-    data.update(team_min=2, team_max=4)
+    # An old saved minimum must not block lowering the maximum or require migration.
+    data.update(team_min=5, team_max=1)
+    validated = validate_hack(data)
+    assert validated["team_min"] == 1 and validated["team_max"] == 1
     data["checkpoints"] = [{"title": "Слишком поздно", "at": (now + timedelta(days=3)).isoformat()}]
     with pytest.raises(UserError, match="Чекпоинт"):
         validate_hack(data)
@@ -141,7 +143,7 @@ async def test_import_uses_rules_and_ignores_landing_and_advertising_post(
     session = await service.extract_import(
         ALLOWED_CHAT, USER_ID, "Хакатон из поста\nКоманда от 80 до 90\n" + ROOT
     )
-    assert session["team_min"] == 2 and session["team_max"] == 5
+    assert "team_min" not in session and session["team_max"] == 5
     assert session["start_at"] == "2026-11-05T07:00:00+00:00"
     assert session["end_at"] == "2026-11-07T15:00:00+00:00"
     assert session["spec_url"] == RULES and session["site_url"] == ROOT
@@ -178,7 +180,6 @@ async def test_llm_receives_only_rules_and_additional_regulations(
         return_value={
             "is_hackathon": True,
             "title": "Название из положения",
-            "team_min": 3,
             "team_max": 6,
             "follow_urls": ["https://invented.example/", "http://127.0.0.1/"],
         }
@@ -204,14 +205,14 @@ async def test_public_document_viewer_is_followed_to_actual_download(service, im
     pages[pdf] = "<pre>Положение о проведении хакатона. Команда от 3 до 4 человек</pre>"
     session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
     assert session["import_sources"] == [pdf]
-    assert session["spec_url"] == pdf and session["team_min"] == 3
+    assert session["spec_url"] == pdf and session["team_max"] == 4
     assert [call.args[0] for call in fetch.await_args_list] == [ROOT, viewer, pdf]
 
 
 async def test_direct_rules_link_does_not_need_a_landing_page(service, import_pages):
     _, fetch = import_pages
     session = await service.extract_import(ALLOWED_CHAT, USER_ID, RULES)
-    assert session["team_min"] == 2 and session["import_sources"] == [RULES]
+    assert session["team_max"] == 5 and session["import_sources"] == [RULES]
     fetch.assert_awaited_once_with(RULES)
 
 
@@ -298,7 +299,7 @@ async def test_unavailable_appendix_preserves_readable_rules(service, import_pag
     pages, _ = import_pages
     pages[RULES] += '<a href="/reglament">Регламент</a>'
     session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
-    assert session["team_min"] == 2 and session["import_sources"] == [RULES]
+    assert session["team_max"] == 5 and session["import_sources"] == [RULES]
     assert "недоступен" in session["import_error"]
 
 
@@ -341,7 +342,7 @@ async def test_conflicting_dates_get_one_document_based_review(
     assert [page["url"] for page in audit.kwargs["previous_pages"]] == [RULES]
     assert "Окончание регистрации" in audit.kwargs["review_issues"][0]
     assert any("перепроверяет даты" in stage for stage in stages)
-    assert session["team_min"] == 2
+    assert session["team_max"] == 5
     if isinstance(review, dict):
         assert session["registration_end"] == review["registration_end"]
         assert session["dates_reviewed"]
@@ -407,7 +408,6 @@ async def test_import_with_failed_date_review_cannot_create_automatically(
         "registration_end": "2026-11-01T20:59:00+00:00",
         "start_at": "2026-11-05T07:00:00+00:00",
         "end_at": "2026-11-07T15:00:00+00:00",
-        "team_min": 2,
         "team_max": 5,
         "checkpoints": [],
         "llm_imported": True,

@@ -55,7 +55,7 @@ class HackNotifications:
             f"Регистрация до: {format_dt(hack.registration_end, tz)}",
             f"Начало: {format_dt(hack.start_at, tz)}",
             f"Конец: {format_dt(hack.end_at, tz)} · {escape(tz_label(tz))}",
-            f"Команда: {hack.team_min}–{hack.team_max} · Участники: {len(members)}",
+            f"Команда: до {hack.team_max} · Участники: {len(members)}",
         ]
         materials = []
         for url, label in (

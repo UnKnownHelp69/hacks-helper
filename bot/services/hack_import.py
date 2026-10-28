@@ -440,9 +440,9 @@ def extract_post(text: str, tz: ZoneInfo) -> dict[str, Any]:
             limits = re.search(r"(?:от\s*)?(\d{1,2})\s*(?:до|[-–—])\s*(\d{1,2})", lower)
             exact = re.search(r"(?:из|ровно)\s*(\d{1,2})\s*(?:человек|участник)", lower)
             if limits and 1 <= int(limits[1]) <= int(limits[2]) <= 100:
-                result.update(team_min=int(limits[1]), team_max=int(limits[2]))
+                result["team_max"] = int(limits[2])
             elif exact and int(exact[1]) > 0:
-                result.update(team_min=int(exact[1]), team_max=int(exact[1]))
+                result["team_max"] = int(exact[1])
         if re.search(r"чат|организатор", lower):
             url = next((u for u in urls if "t.me/" in u and u in line), None)
             if url:
@@ -488,10 +488,9 @@ def extract_page(html: str, url: str, tz: ZoneInfo) -> dict[str, Any]:
             offers = offers[0] if offers else {}
         if isinstance(offers, dict) and (value := _iso(offers.get("validThrough"), tz)):
             result["registration_end"] = value
-        for target, key in (("team_min", "minTeamSize"), ("team_max", "maxTeamSize")):
-            raw = event.get(key)
-            if isinstance(raw, int) and not isinstance(raw, bool) and 1 <= raw <= 100:
-                result[target] = raw
+        raw = event.get("maxTeamSize")
+        if isinstance(raw, int) and not isinstance(raw, bool) and 1 <= raw <= 100:
+            result["team_max"] = raw
         break
     result["site_url"] = public_url(url)
     result["source_url"] = result["site_url"]

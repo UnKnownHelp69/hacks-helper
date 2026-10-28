@@ -170,7 +170,7 @@ async def test_function_extraction_and_provider_credentials_stay_separate():
                     "message": {
                         "function_call": {
                             "name": "extract_hackathon",
-                            "arguments": fields(team_min=True),
+                            "arguments": fields(team_max=True),
                         }
                     },
                 }

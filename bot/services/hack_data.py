@@ -18,14 +18,13 @@ FIELD_LABELS = {
     "registration_end": "Конец регистрации",
     "start_at": "Начало",
     "end_at": "Конец",
-    "team_min": "Минимум в команде",
     "team_max": "Максимум в команде",
     "site_url": "Сайт",
     "repo": "Репозиторий GitHub",
     "org_chat_url": "Чат организаторов",
     "spec_url": "ТЗ: ссылка или файл",
 }
-REQUIRED_FIELDS = ("title", "registration_end", "start_at", "end_at", "team_min", "team_max")
+REQUIRED_FIELDS = ("title", "registration_end", "start_at", "end_at", "team_max")
 DATE_FIELDS = {"registration_end", "start_at", "end_at"}
 
 
@@ -41,7 +40,7 @@ def input_field(field: str, raw: str, tz: ZoneInfo) -> Any:
         return None
     if field in DATE_FIELDS:
         return input_datetime(raw, tz)
-    if field in {"team_min", "team_max"}:
+    if field == "team_max":
         if not raw.isdigit() or not 1 <= int(raw) <= 100:
             raise UserError("Укажите целое число от 1 до 100")
         return int(raw)
@@ -93,11 +92,11 @@ def validate_hack(data: dict[str, Any]) -> dict[str, Any]:
     validate_dates(dates["registration_end"], dates["start_at"], dates["end_at"])
     if dates["end_at"] <= utcnow():
         raise UserError("Окончание хакатона должно быть в будущем")
-    minimum, maximum = data["team_min"], data["team_max"]
-    if any(not isinstance(size, int) or isinstance(size, bool) for size in (minimum, maximum)):
+    maximum = data["team_max"]
+    if not isinstance(maximum, int) or isinstance(maximum, bool):
         raise UserError("Размер команды должен быть целым числом")
-    if not 1 <= minimum <= maximum <= 100:
-        raise UserError("Размер команды: 1 ≤ минимум ≤ максимум ≤ 100")
+    if not 1 <= maximum <= 100:
+        raise UserError("Размер команды должен быть от 1 до 100")
     checkpoints = data.get("checkpoints", [])
     if not isinstance(checkpoints, list) or len(checkpoints) > 20:
         raise UserError("Можно добавить до 20 чекпоинтов")
@@ -110,7 +109,8 @@ def validate_hack(data: dict[str, Any]) -> dict[str, Any]:
             raise UserError("Чекпоинт должен наступать до окончания хакатона")
     fields: dict[str, Any] = {
         "title": title.strip(),
-        "team_min": minimum,
+        # Keep the legacy database constraint compatible; there is no minimum setting.
+        "team_min": 1,
         "team_max": maximum,
         **{key: to_db(value) for key, value in dates.items()},
     }

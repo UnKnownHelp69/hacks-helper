@@ -12,9 +12,7 @@ TZ = ZoneInfo("Europe/Moscow")
 
 def fields(**overrides):
     result = dict.fromkeys(Extraction.model_fields)
-    result.update(
-        is_hackathon=True, title="AI Hack", team_min=2, team_max=5, checkpoints=[], follow_urls=[]
-    )
+    result.update(is_hackathon=True, title="AI Hack", team_max=5, checkpoints=[], follow_urls=[])
     result.update(overrides)
     return result
 
@@ -60,6 +58,7 @@ async def test_structured_request_and_normalized_dates():
         schema = body["response_format"]["json_schema"]
         assert schema["strict"] and not schema["schema"]["additionalProperties"]
         assert set(schema["schema"]["required"]) == set(Extraction.model_fields)
+        assert "team_min" not in schema["schema"]["properties"]
         assert body["max_tokens"] == 8000
         context = json.loads(body["messages"][1]["content"])
         assert context["timezone"] == TZ.key
@@ -95,7 +94,7 @@ async def test_structured_request_and_normalized_dates():
 @pytest.mark.parametrize(
     "payload",
     [
-        response(fields(team_min=True)),
+        response(fields(team_max=True)),
         response(fields(team_max=101)),
         response(fields(start_at="2026-11-05T10:00:00")),
         response(fields(start_at="0001-01-01T00:00:00+14:00")),
@@ -208,14 +207,14 @@ async def test_free_router_accepts_endpoint_with_mandatory_reasoning():
                     }
                 },
             )
-        return httpx.Response(200, json=response(fields(title="ИИкузница", team_min=1)))
+        return httpx.Response(200, json=response(fields(title="ИИкузница", team_max=1)))
 
     llm = client(mandatory_endpoint, mandatory=True)
     try:
         result = await llm.extract(
             "https://иикузница.рф", "<h1>Хакатон ИИкузница</h1>", "https://иикузница.рф/", TZ
         )
-        assert result["title"] == "ИИкузница" and result["team_min"] == 1
+        assert result["title"] == "ИИкузница" and result["team_max"] == 1
         assert len(requests) == 1
     finally:
         await llm.close()

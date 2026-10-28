@@ -526,13 +526,16 @@ async def test_non_admin_manual_creation_edit_and_ephemeral_input(app):
         "01.12.2026 23:59",
         "05.12.2026 10:00",
         "07.12.2026 18:00",
-        "2",
         "3",
     ):
         await answer_form(app, value)
     hack = (await app["storage"].hackathons.list(ALLOWED_CHAT))[0]
     await click(app, "Открыть хакатон")
     await click(app, "Редактировать")
+    assert "Минимум" not in private_panel(app).text
+    assert not any(
+        "Минимум" in b.text for row in private_panel(app).reply_markup.inline_keyboard for b in row
+    )
     for label, value in (
         ("Сайт", "https://hack.example/event"),
         ("Репозиторий GitHub", "team/project"),
@@ -559,7 +562,7 @@ async def test_non_admin_manual_creation_edit_and_ephemeral_input(app):
     assert (
         hack.created_by == USER_ID
         and hack.repo == REPO
-        and hack.team_min == 2
+        and hack.team_min == 1
         and hack.team_max == 3
     )
     assert hack.spec_file_id == "SPEC" and hack.org_chat_url == "https://t.me/organizers"
@@ -824,7 +827,6 @@ async def test_import_progress_stays_personal_and_fills_fields_before_completion
                 "title": "Хакатон из LLM",
                 "is_hackathon": True,
                 "team_max": 5,
-                "team_min": 2,
                 "registration_end": "2026-12-01T20:59:00+00:00",
                 "start_at": "2026-12-05T07:00:00+00:00",
                 "end_at": "2026-12-07T15:00:00+00:00",
@@ -847,13 +849,13 @@ async def test_import_progress_stays_personal_and_fills_fields_before_completion
         await asyncio.wait_for(rules_entered.wait(), timeout=1)
         partial = app["session"].messages[-1]
         assert "Максимум в команде:</b> 5" in partial.text
-        assert "Минимум в команде:</b> 2" in partial.text
+        assert "Минимум" not in partial.text
         assert await app["storage"].hackathons.list(chat_id) == []
         rules_release.set()
         await job
         complete = private_panel(app, ALICE, chat_id)
         assert "создан" in complete.text if chat_id < 0 else "Участники:" in complete.text
-        assert (await app["storage"].hackathons.list(chat_id))[0].team_min == 2
+        assert (await app["storage"].hackathons.list(chat_id))[0].team_min == 1
         assert (complete.ephemeral_message_id if chat_id < 0 else complete.message_id) == initial_id
         sends = [
             m
@@ -903,7 +905,6 @@ async def test_commands_manual_form_and_result_reuse_one_personal_message(app, c
         "01.12.2026 23:59",
         "05.12.2026 10:00",
         "07.12.2026 18:00",
-        "2",
         "5",
     ):
         await answer_form(app, value, chat_id=chat_id)
@@ -969,7 +970,6 @@ async def test_background_progress_does_not_overwrite_a_newer_menu(app, monkeypa
         return {
             "is_hackathon": True,
             "title": "Фоновый импорт",
-            "team_min": 2,
             "team_max": 5,
             "registration_end": "2026-12-01T20:59:00+00:00",
             "start_at": "2026-12-05T07:00:00+00:00",
@@ -1023,7 +1023,7 @@ async def test_invalid_manual_dates_are_retried_on_same_panel_before_creation(ap
     await answer_form(app, "07.12.2026 10:00")
     await answer_form(app, "06.12.2026 18:00")
     assert "Начало хакатона должно быть раньше" in app["session"].last_text()
-    for value in ("09.12.2026 18:00", "2", "5"):
+    for value in ("09.12.2026 18:00", "5"):
         await answer_form(app, value)
     assert len(await app["storage"].hackathons.list(ALLOWED_CHAT)) == 1
     personal = [
@@ -1248,6 +1248,7 @@ async def test_team_list_shows_all_rosters_with_telegram_aliases_in_place(app, c
     assert panel.ephemeral_message_id == initial.ephemeral_message_id
     for label in ("Команда 1", "Команда 2", "@alice_tg", "@bob", "@eve"):
         assert label in panel.text
+    assert "Минимум" not in panel.text
     assert '<a href="tg://user?id=3003">Без &lt;алиаса&gt;</a>' in panel.text
     assert [b.text for row in panel.reply_markup.inline_keyboard for b in row] == [
         "В меню",

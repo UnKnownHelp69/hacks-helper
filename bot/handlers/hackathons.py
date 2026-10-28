@@ -172,7 +172,7 @@ async def prompt(
         if field in DATE_FIELDS:
             tz = await ctx.zone(session.chat_id)
             text += f"\nФормат: ДД.ММ.ГГГГ ЧЧ:ММ. Часовой пояс: {escape(tz.key)}."
-        elif field in {"team_min", "team_max"}:
+        elif field == "team_max":
             text += "\nЦелое число от 1 до 100."
         elif field == "repo":
             text += "\nФормат: owner/repo или ссылка на GitHub."
@@ -227,7 +227,7 @@ async def show_teams(event: Event, ctx: AppContext, session: HackSession, page: 
     mine = next((team for team in teams if session.user_id in team.members), None)
     lines = [
         f"👥 <b>{escape(hack.display_name)}</b>",
-        f"Минимум: {hack.team_min}, максимум: {hack.team_max}",
+        f"Максимум в команде: {hack.team_max}",
     ]
     lines.append(f"Моя команда: {escape(mine.name) if mine else 'не выбрана'}")
     rows = [[button(session, "В меню", "menu")]]
@@ -240,8 +240,7 @@ async def show_teams(event: Event, ctx: AppContext, session: HackSession, page: 
     # Keep complete names and repeat the team heading when a large roster spans pages.
     pages: list[tuple[list[str], list[Team]]] = [([], [])]
     for team in teams:
-        state = "готова" if len(team.members) >= hack.team_min else "набор"
-        heading = f"<b>{escape(team.name)}</b>: {len(team.members)}/{hack.team_max}, {state}"
+        heading = f"<b>{escape(team.name)}</b>: {len(team.members)}/{hack.team_max}"
         members = [
             "• " + (await ctx.directory.lookup(hack.chat_id, user_id)).mention
             for user_id in team.members
