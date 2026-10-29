@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
-from aiogram.types import LinkPreviewOptions
+from aiogram.types import EphemeralMessageParameters, LinkPreviewOptions
 
 from bot.db.repositories import AvailabilityRepo
 from bot.services.availability import deserialize_schedule, is_available, next_available
@@ -28,7 +28,15 @@ class Messenger:
     def __init__(self, api: MessageApi) -> None:
         self.api = api
 
-    async def send(self, chat_id: int, text: str) -> bool:
+    async def send(self, chat_id: int, text: str, *, receiver_user_id: int | None = None) -> bool:
+        options: dict[str, Any] = {}
+        if receiver_user_id is not None:
+            if chat_id > 0 and chat_id != receiver_user_id:
+                return False
+            if chat_id < 0:
+                options["ephemeral_message_parameters"] = EphemeralMessageParameters(
+                    receiver_user_id=receiver_user_id
+                )
         ok = True
         for chunk in split_message(text):
             try:
@@ -37,6 +45,7 @@ class Messenger:
                     chunk,
                     parse_mode="HTML",
                     link_preview_options=LinkPreviewOptions(is_disabled=True),
+                    **options,
                 )
             except Exception:
                 log.exception("Failed to send a message to chat %s", chat_id)

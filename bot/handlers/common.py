@@ -8,13 +8,17 @@ from html import escape
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
+from aiosqlite import IntegrityError
 
 from bot.context import AppContext
 from bot.db.models import HackSession
 from bot.errors import UserError
 from bot.handlers.interactive import callback_session, keyboard, session_button
-from bot.handlers.views import me_view
+from bot.handlers.views import me_view, tasks_view
+from bot.middlewares.security import command_name
 from bot.respond import personal_reply, reply
+from bot.services.formatting import link, split_message
+from bot.services.github import normalize_login
 from bot.texts import HELP_TEXT
 
 router = Router(name="common")
@@ -65,8 +69,65 @@ async def profile(event: Event, ctx: AppContext, session: HackSession | None = N
         "<b>Профиль и настройки</b>\n"
         + text
         + f"\nНейросеть: {label} · <code>{escape(model)}</code>",
-        reply_markup=keyboard([[button(session, "🤖 Модель нейросети", "llm")]]),
+        reply_markup=keyboard(
+            [
+                [button(session, "📝 Мои задачи", "tasks", 0)],
+                [button(session, "🐙 Аккаунт GitHub", "github")],
+                [button(session, "🤖 Модель нейросети", "llm")],
+            ]
+        ),
     )
+
+
+async def my_tasks(event: Event, ctx: AppContext, session: HackSession, page: int = 0) -> None:
+    text = await tasks_view(ctx, session.chat_id, session.user_id)
+    chunks = split_message(text, limit=3000)
+    page = min(max(page, 0), len(chunks) - 1)
+    session.step = "tasks"
+    await ctx.storage.workflow.save_session(session)
+    rows = [[button(session, "К профилю", "profile")]]
+    navigation = []
+    if page:
+        navigation.append(button(session, "←", "tasks", page - 1))
+    if page + 1 < len(chunks):
+        navigation.append(button(session, "→", "tasks", page + 1))
+    if navigation:
+        rows.append(navigation)
+    await personal_reply(event, chunks[page], reply_markup=keyboard(rows))
+
+
+async def github_account(event: Event, ctx: AppContext, session: HackSession) -> None:
+    session.step = "github"
+    await ctx.storage.workflow.save_session(session)
+    login = await ctx.storage.github_links.get_login(session.user_id)
+    account = link(f"https://github.com/{login}", login) if login else "не привязан"
+    rows = [[button(session, "К профилю", "profile")]]
+    rows.append([button(session, "Изменить аккаунт" if login else "Привязать аккаунт", "gh_link")])
+    if login:
+        rows.append([button(session, "Отвязать аккаунт", "gh_unlink")])
+    await personal_reply(
+        event,
+        f"🐙 <b>Аккаунт GitHub</b>\n{account}\n"
+        "Привяжите свой логин, чтобы бот назначал вам issues и на GitHub. "
+        "Без привязки задачи остаются доступны в боте.",
+        reply_markup=keyboard(rows),
+    )
+
+
+async def github_prompt(
+    event: Event, ctx: AppContext, session: HackSession, error: str = ""
+) -> None:
+    session.step = "form:github_login"
+    await ctx.storage.workflow.save_session(session)
+    sent = await personal_reply(
+        event,
+        (f"❌ {error}\n\n" if error else "") + "Пришлите свой GitHub-логин или ссылку на профиль.\n"
+        "Ответьте на это личное сообщение. Токен GitHub присылать не нужно.",
+        reply_markup=keyboard([[button(session, "Отмена", "github")]]),
+    )
+    if isinstance(sent, Message):
+        identifier = sent.ephemeral_message_id or sent.message_id
+        await ctx.storage.workflow.bind_prompt(session, identifier)
 
 
 async def llm_menu(event: Event, ctx: AppContext, session: HackSession) -> None:
@@ -143,6 +204,15 @@ async def callback_me(callback: CallbackQuery, ctx: AppContext) -> None:
     try:
         if action == "profile":
             await profile(callback, ctx, session)
+        elif action == "tasks":
+            await my_tasks(callback, ctx, session, int(argument))
+        elif action == "github":
+            await github_account(callback, ctx, session)
+        elif action == "gh_link":
+            await github_prompt(callback, ctx, session)
+        elif action == "gh_unlink":
+            await ctx.storage.github_links.remove(session.user_id)
+            await github_account(callback, ctx, session)
         elif action == "llm":
             await llm_menu(callback, ctx, session)
         elif action == "llm_provider":
@@ -171,3 +241,45 @@ async def callback_me(callback: CallbackQuery, ctx: AppContext) -> None:
             f"❌ {exc.message}",
             reply_markup=keyboard([[button(session, "К профилю", "profile")]]),
         )
+
+
+async def github_input_session(message: Message, ctx: AppContext) -> dict | bool:
+    if message.from_user is None or command_name(message) is not None:
+        return False
+    session = await ctx.storage.workflow.session(message.from_user.id, chat_id=message.chat.id)
+    if session is None or session.step != "form:github_login":
+        return False
+    return {"github_session": session}
+
+
+@router.message(F.text | F.caption | F.document, github_input_session)
+async def github_input(message: Message, ctx: AppContext, github_session: HackSession) -> None:
+    session = github_session
+    await ctx.hacks.require_access(session.chat_id, session.user_id)
+    if message.chat.type != "private" and message.ephemeral_message_id is None:
+        await github_prompt(message, ctx, session, "Ответьте в личной панели бота")
+        return
+    if message.reply_to_message is not None:
+        replied = message.reply_to_message
+        identifier = replied.ephemeral_message_id or replied.message_id
+        if identifier != session.data.get("_prompt_id"):
+            await github_prompt(message, ctx, session, "Это ответ на старый запрос")
+            return
+    raw = (message.text or message.caption or "").strip()
+    if raw.lower() in {"отмена", "cancel"}:
+        await github_account(message, ctx, session)
+        return
+    try:
+        login = normalize_login(raw)
+        if not await ctx.github.user_exists(login):
+            raise UserError("Пользователь GitHub не найден")
+        await ctx.storage.workflow.save_session(session)
+        await ctx.storage.github_links.set_login(session.user_id, login)
+    except IntegrityError:
+        await github_prompt(
+            message, ctx, session, "Этот GitHub-аккаунт уже привязан к другому человеку"
+        )
+    except UserError as exc:
+        await github_prompt(message, ctx, session, exc.message)
+    else:
+        await github_account(message, ctx, session)

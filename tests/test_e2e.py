@@ -1301,3 +1301,301 @@ async def test_unassigned_participant_cannot_create_team_while_a_place_is_availa
     labels = [b.text for row in private_panel(app).reply_markup.inline_keyboard for b in row]
     assert "Вступить: Команда 1" in labels
     assert not any("Новая команда" in label for label in labels)
+
+
+async def open_task_assignment(app, hack, actor=ALICE, chat_id=ALLOWED_CHAT):
+    await send(app, f"/hack {hack.slug}", actor, chat_id)
+    await click(app, "Задачи", actor, chat_id)
+    await click(app, "Назначить issue", actor, chat_id)
+    await click(app, "#12", actor, chat_id)
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+async def test_issue_assignment_notifies_assignee_and_shows_personal_tasks_in_place(app, chat_id):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    hack = await create_hack(app, chat_id)
+    await app["storage"].hackathons.update_fields(hack.id, repo=REPO)
+    await app["storage"].hackathons.add_member(hack.id, USER_ID)
+    await app["storage"].github_links.set_login(USER_ID, "alice-gh")
+    assign = AsyncMock(wraps=app["ctx"].github.add_assignees)
+    app["ctx"].github.add_assignees = assign
+    await open_task_assignment(app, hack, chat_id=chat_id)
+    panel = private_panel(app, chat_id=chat_id)
+    data = next(
+        b.callback_data
+        for row in panel.reply_markup.inline_keyboard
+        for b in row
+        if b.text == "@alice_tg"
+    )
+    await asyncio.gather(*(press(app, data, ALICE, chat_id, source=panel) for _ in range(2)))
+    assign.assert_awaited_once_with(REPO, 12, ["alice-gh"])
+    assigned = await app["storage"].tasks.active_for_user(USER_ID, [hack.id])
+    assert len(assigned) == 1 and assigned[0].issue_number == 12 and assigned[0].seen_assigned
+    notifications = [
+        r
+        for r in app["session"].requests
+        if isinstance(r, SendMessage) and "Вам назначена" in r.text
+    ]
+    assert len(notifications) == 1 and notifications[0].chat_id == chat_id
+    if chat_id < 0:
+        assert notifications[0].ephemeral_message_parameters.receiver_user_id == USER_ID
+    current = private_panel(app, chat_id=chat_id)
+    assert current.message_id == panel.message_id
+    assert current.ephemeral_message_id == panel.ephemeral_message_id
+    await send(app, "/me", ALICE, chat_id)
+    await click(app, "Мои задачи", chat_id=chat_id)
+    current = private_panel(app, chat_id=chat_id)
+    assert "Авторизация" in current.text and "не начато" in current.text
+    assert f"https://github.com/{REPO}/issues/12" in current.text
+
+
+async def test_non_admin_can_assign_to_another_participant_without_exposing_their_tasks(app):
+    bob = tg_user(3003, "bob_tg", "Bob")
+    await send(app, "/me", bob)
+    hack = await create_hack(app)
+    await app["storage"].hackathons.update_fields(hack.id, repo=REPO)
+    await app["storage"].hackathons.add_member(hack.id, USER_ID)
+    await app["storage"].hackathons.add_member(hack.id, bob.id)
+    await open_task_assignment(app, hack)
+    await click(app, "@bob_tg")
+    assert "GitHub не привязан" in private_panel(app).text
+    notification = next(
+        r
+        for r in app["session"].requests
+        if isinstance(r, SendMessage) and "Вам назначена" in r.text
+    )
+    assert notification.ephemeral_message_parameters.receiver_user_id == bob.id
+    await send(app, "/me", ALICE)
+    await click(app, "Мои задачи")
+    assert "задач нет" in private_panel(app).text
+    await send(app, "/me", bob)
+    await click(app, "Мои задачи", bob)
+    assert "Авторизация" in private_panel(app, bob).text
+    assert all(
+        r.ephemeral_message_parameters is not None
+        for r in app["session"].requests
+        if isinstance(r, SendMessage)
+    )
+
+
+@pytest.mark.parametrize("change", ["repo", "left_chat", "not_registered", "closed"])
+async def test_issue_assignment_rechecks_repository_recipient_and_issue(app, monkeypatch, change):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    hack = await create_hack(app)
+    await app["storage"].hackathons.update_fields(hack.id, repo=REPO)
+    await app["storage"].hackathons.add_member(hack.id, USER_ID)
+    await open_task_assignment(app, hack)
+    if change == "repo":
+        await app["storage"].hackathons.update_fields(hack.id, repo="other/repository")
+    elif change == "left_chat":
+        app["session"].members.pop(USER_ID)
+    elif change == "not_registered":
+        await app["storage"].db.execute(
+            "DELETE FROM hackathon_members WHERE hackathon_id=? AND user_id=?", (hack.id, USER_ID)
+        )
+    else:
+        issue = await app["ctx"].github.get_issue(REPO, 12)
+        monkeypatch.setattr(
+            app["ctx"].github, "get_issue", AsyncMock(return_value=replace(issue, state="closed"))
+        )
+    await click(app, "@alice_tg")
+    assert await app["storage"].tasks.active_for_hackathon(hack.id) == []
+    assert not any(
+        isinstance(r, SendMessage) and "Вам назначена" in r.text for r in app["session"].requests
+    )
+
+
+async def test_failed_personal_task_notification_keeps_task_without_public_fallback(
+    app, monkeypatch
+):
+    hack = await create_hack(app)
+    await app["storage"].hackathons.update_fields(hack.id, repo=REPO)
+    await app["storage"].hackathons.add_member(hack.id, USER_ID)
+    await open_task_assignment(app, hack)
+    original = app["session"].make_request
+
+    async def reject_notification(bot, method, timeout=None):
+        if isinstance(method, SendMessage) and "Вам назначена" in method.text:
+            app["session"].requests.append(method)
+            raise TelegramBadRequest(method=method, message="Ephemeral delivery unavailable")
+        return await original(bot, method, timeout)
+
+    monkeypatch.setattr(app["session"], "make_request", reject_notification)
+    await click(app, "@alice_tg")
+    assert "уведомление не доставлено" in private_panel(app).text
+    await send(app, "/me", ALICE)
+    await click(app, "Мои задачи")
+    assert "Авторизация" in private_panel(app).text
+    assert all(
+        r.ephemeral_message_parameters is not None
+        for r in app["session"].requests
+        if isinstance(r, SendMessage)
+    )
+
+
+async def test_saved_tasks_are_visible_when_github_is_disconnected_and_scoped_to_chat(app):
+    from bot.db.models import TASK_NOT_STARTED, TASK_SOURCE_BOT
+
+    hack = await create_hack(app)
+    await app["storage"].hackathons.update_fields(hack.id, repo=REPO)
+    other = await create_hack(app, FOREIGN_CHAT)
+    for h, title in ((hack, "Моя задача"), (other, "Задача другого чата")):
+        await app["storage"].tasks.upsert_active(
+            h.id,
+            USER_ID,
+            12,
+            title,
+            f"https://github.com/{REPO}/issues/12",
+            TASK_NOT_STARTED,
+            TASK_SOURCE_BOT,
+            False,
+        )
+    app["ctx"].github.token = None
+    await send(app, "/me", ALICE)
+    await click(app, "Мои задачи")
+    assert (
+        "Моя задача" in private_panel(app).text
+        and "Задача другого чата" not in private_panel(app).text
+    )
+    await send(app, f"/hack {hack.slug}", ALICE)
+    await click(app, "Задачи")
+    assert (
+        "GitHub не подключён" in private_panel(app).text and "Моя задача" in private_panel(app).text
+    )
+    assert not any(
+        "Назначить" in b.text
+        for row in private_panel(app).reply_markup.inline_keyboard
+        for b in row
+    )
+
+
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+async def test_github_account_can_be_linked_changed_and_unlinked_privately(app, chat_id):
+    app["ctx"].settings.allowed_chat_ids.add(chat_id)
+    await send(app, "/me", ALICE, chat_id)
+    await click(app, "Аккаунт GitHub", chat_id=chat_id)
+    await click(app, "Привязать аккаунт", chat_id=chat_id)
+    initial = private_panel(app, chat_id=chat_id)
+    await answer_form(app, "https://github.com/alice-gh", chat_id=chat_id)
+    assert await app["storage"].github_links.get_login(USER_ID) == "alice-gh"
+    current = private_panel(app, chat_id=chat_id)
+    assert (
+        current.message_id == initial.message_id
+        and current.ephemeral_message_id == initial.ephemeral_message_id
+    )
+    await click(app, "Изменить аккаунт", chat_id=chat_id)
+    await click(app, "Отмена", chat_id=chat_id)
+    assert await app["storage"].github_links.get_login(USER_ID) == "alice-gh"
+    await click(app, "Отвязать аккаунт", chat_id=chat_id)
+    assert await app["storage"].github_links.get_login(USER_ID) is None
+
+
+async def test_github_link_duplicate_and_invalid_input_preserve_previous_account(app):
+    await app["storage"].github_links.set_login(USER_ID, "old-alice")
+    await app["storage"].github_links.set_login(3003, "bob-gh")
+    await send(app, "/me", ALICE)
+    await click(app, "Аккаунт GitHub")
+    await click(app, "Изменить аккаунт")
+    await answer_form(app, "https://github.com/bob-gh")
+    assert "уже привязан" in private_panel(app).text
+    assert await app["storage"].github_links.get_login(USER_ID) == "old-alice"
+    await answer_form(app, "https://evil.example/alice")
+    assert await app["storage"].github_links.get_login(USER_ID) == "old-alice"
+    await send(app, "/me", ALICE)
+    assert await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is not None
+    assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
+
+
+async def test_issue_and_participant_lists_are_paginated_and_assign_correct_issue(app, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from bot.services.github import Issue
+
+    hack = await create_hack(app)
+    await app["storage"].hackathons.update_fields(hack.id, repo=REPO)
+    issues = [
+        Issue(n, f"Задача {n}", "open", f"https://github.com/{REPO}/issues/{n}", (), ())
+        for n in range(12, 23)
+    ]
+    monkeypatch.setattr(app["ctx"].github, "list_open_issues", AsyncMock(return_value=issues))
+    monkeypatch.setattr(
+        app["ctx"].github,
+        "get_issue",
+        AsyncMock(side_effect=lambda repo, n: next(i for i in issues if i.number == n)),
+    )
+    actors = [ALICE, *[tg_user(uid, f"participant_{uid}") for uid in range(3000, 3010)]]
+    for actor in actors:
+        app["session"].members[actor.id] = actor
+        await app["storage"].hackathons.add_member(hack.id, actor.id)
+    await send(app, f"/hack {hack.slug}", ALICE)
+    await click(app, "Задачи")
+    await click(app, "Назначить issue")
+    first = private_panel(app)
+    await click(app, "→")
+    await click(app, "#20")
+    await click(app, "→")
+    await click(app, "@participant_3009")
+    assigned = await app["storage"].tasks.active_for_hackathon(hack.id)
+    assert len(assigned) == 1 and (assigned[0].issue_number, assigned[0].user_id) == (20, 3009)
+    assert private_panel(app).ephemeral_message_id == first.ephemeral_message_id
+
+
+async def test_personal_task_list_pages_show_all_tasks_without_new_messages(app):
+    from bot.db.models import TASK_NOT_STARTED, TASK_SOURCE_BOT
+
+    hack = await create_hack(app)
+    for number in range(1, 41):
+        await app["storage"].tasks.upsert_active(
+            hack.id,
+            USER_ID,
+            number,
+            f"Issue {number}: " + "Подробности " * 8,
+            f"https://github.com/{REPO}/issues/{number}",
+            TASK_NOT_STARTED,
+            TASK_SOURCE_BOT,
+            False,
+        )
+    await send(app, "/me", ALICE)
+    await click(app, "Мои задачи")
+    first = private_panel(app)
+    texts = [first.text]
+    while any(
+        b.text == "→" for row in private_panel(app).reply_markup.inline_keyboard for b in row
+    ):
+        await click(app, "→")
+        current = private_panel(app)
+        assert current.ephemeral_message_id == first.ephemeral_message_id
+        texts.append(current.text)
+        assert len(texts) < 10
+    assert len(texts) > 1
+    assert all(f"Issue {n}:" in "\n".join(texts) for n in range(1, 41))
+    assert len([r for r in app["session"].requests if isinstance(r, SendMessage)]) == 1
+
+
+async def test_issue_selection_rejects_unlisted_numbers_and_another_users_buttons(app):
+    hack = await create_hack(app)
+    await app["storage"].hackathons.update_fields(hack.id, repo=REPO)
+    await app["storage"].hackathons.add_member(hack.id, USER_ID)
+    await send(app, f"/hack {hack.slug}", ALICE)
+    await click(app, "Задачи")
+    await click(app, "Назначить issue")
+    panel = private_panel(app)
+    data = next(
+        b.callback_data
+        for row in panel.reply_markup.inline_keyboard
+        for b in row
+        if "#12" in b.text
+    )
+    bob = tg_user(3003, "bob_tg")
+    before = len(app["session"].requests)
+    await press(app, data, bob, source=panel)
+    assert len(app["session"].requests) == before
+    forged = data.rsplit(":", 1)[0] + ":99"
+    await press(app, forged, ALICE, source=panel)
+    assert "из текущего списка" in private_panel(app).text
+    assert await app["storage"].tasks.active_for_hackathon(hack.id) == []

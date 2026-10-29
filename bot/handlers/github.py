@@ -20,4 +20,9 @@ async def cmd_github(message: Message, ctx: AppContext) -> None:
     login = await ctx.storage.github_links.get_login(message.from_user.id)
     account = link(f"https://github.com/{login}", login) if login else "не привязан"
     status = "настроена" if ctx.github.configured else "не настроена"
-    await reply(message, f"🐙 <b>GitHub</b>\nАккаунт: {account}\nИнтеграция: {status}")
+    await reply(
+        message,
+        f"🐙 <b>GitHub</b>\nАккаунт: {account}\nИнтеграция: {status}\n"
+        "Привязка аккаунта: /me → Аккаунт GitHub\n"
+        "Назначение issues: /hack → хакатон → Задачи",
+    )

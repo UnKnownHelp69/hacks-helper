@@ -20,6 +20,7 @@ from bot.errors import UserError
 from bot.handlers.base import usage
 from bot.handlers.import_progress import ImportProgress
 from bot.handlers.interactive import callback_session, keyboard, session_button
+from bot.handlers.tasks import assign_issue, choose_assignee, choose_issue, show_tasks
 from bot.middlewares.security import command_name
 from bot.respond import personal_options, personal_reply
 from bot.services.args import parse_command
@@ -208,6 +209,8 @@ async def show_hack(event: Event, ctx: AppContext, session: HackSession, notice:
     if checkpoints:
         details.append(button(session, "📍 Чекпоинты", "checkpoints"))
     rows.append(details)
+    if hack.repo:
+        rows.append([button(session, "🐙 Задачи", "tasks")])
     if hack.spec_file_id:
         rows.append([button(session, "📄 Получить ТЗ", "spec")])
     if active:
@@ -426,6 +429,22 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
         elif action == "edit":
             session = await ctx.hacks.edit(int(session.data["hack_id"]), session.user_id)
             await edit_menu(callback, ctx, session)
+        elif action in {"tasks", "task_page"}:
+            await show_tasks(callback, ctx, session, int(argument) if action == "task_page" else 0)
+        elif action == "task_issues":
+            await choose_issue(callback, ctx, session, int(argument))
+        elif action == "task_issue":
+            number = int(argument)
+            if session.step != "task:issues" or number not in session.data.get("_task_issues", []):
+                raise UserError("Выберите issue из текущего списка")
+            session.data["_task_issue"] = number
+            await choose_assignee(callback, ctx, session)
+        elif action == "task_members":
+            if session.step != "task:assignee":
+                raise UserError("Сначала выберите issue")
+            await choose_assignee(callback, ctx, session, int(argument))
+        elif action == "task_assign":
+            await assign_issue(callback, ctx, session, int(argument))
         elif action == "vote":
             if argument not in {"yes", "no"}:
                 raise UserError("Выберите «Участвую» или «Отмена регистрации»")

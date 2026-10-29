@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -42,7 +43,7 @@ class TaskResult:
 
 def require_repo(hack: Hackathon) -> str:
     if not hack.repo:
-        raise UserError(f"У {escape(hack.slug)} нет репозитория (/repo)")
+        raise UserError("Добавьте репозиторий в /hack → Редактировать → Репозиторий GitHub")
     return hack.repo
 
 
@@ -60,6 +61,7 @@ class TaskService:
         self.github = github
         self.pinger = pinger
         self.messenger = messenger
+        self._assignment_lock = asyncio.Lock()
 
     async def issue_status(self, repo: str, issue: Issue) -> str:
         if issue.state == "closed":
@@ -81,7 +83,9 @@ class TaskService:
     ) -> bool:
         """Set the GitHub assignee if a login is linked. Returns True if assigned."""
         if not login:
-            warnings.append("GitHub не привязан, assignee не поставлен (/link_github)")
+            warnings.append(
+                "GitHub не привязан: задача сохранена в боте. Привязка аккаунта — в /me"
+            )
             return False
         if login.lower() in {a.lower() for a in issue.assignees}:
             return True
@@ -96,35 +100,53 @@ class TaskService:
         return True
 
     async def assign(self, hack: Hackathon, user_id: int, issue_number: int) -> TaskResult:
-        repo = require_repo(hack)
-        if not hack.is_active:
-            raise UserError("Хакатон в архиве")
-        if not await self.storage.hackathons.is_member(hack.id, user_id):
-            raise UserError(f"Не участвует в {escape(hack.slug)} (/add)")
-        existing = await self.storage.tasks.get(hack.id, user_id, issue_number)
-        if existing and existing.active:
-            raise UserError(f"#{issue_number} уже назначена")
-        try:
-            issue = await self.github.get_issue(repo, issue_number)
-        except GitHubNotFound:
-            raise UserError(f"#{issue_number} не найден в {escape(repo)}") from None
-        if issue.state == "closed":
-            raise UserError(f"#{issue_number} уже закрыт")
-        warnings: list[str] = []
-        login = await self.storage.github_links.get_login(user_id)
-        assigned = await self._ensure_github_assignee(repo, issue, login, warnings)
-        status = await self.issue_status(repo, issue)
-        task = await self.storage.tasks.upsert_active(
-            hack.id,
-            user_id,
-            issue.number,
-            issue.title,
-            issue.html_url,
-            status,
-            TASK_SOURCE_BOT,
-            assigned,
-        )
-        return TaskResult(task, issue, warnings)
+        async with self._assignment_lock:
+            current = await self.storage.hackathons.get_by_id(hack.id)
+            if current is None:
+                raise UserError("Хакатон больше недоступен")
+            if current.repo != hack.repo:
+                raise UserError("Репозиторий изменился. Откройте список задач заново")
+            hack = current
+            repo = require_repo(hack)
+            if not hack.is_active:
+                raise UserError("Хакатон в архиве")
+            if not await self.storage.hackathons.is_member(hack.id, user_id):
+                raise UserError(f"Исполнитель не участвует в {escape(hack.slug)}")
+            existing = await self.storage.tasks.get(hack.id, user_id, issue_number)
+            if existing and existing.active:
+                raise UserError(f"#{issue_number} уже назначена")
+            try:
+                issue = await self.github.get_issue(repo, issue_number)
+            except GitHubNotFound:
+                raise UserError(f"#{issue_number} не найден в {escape(repo)}") from None
+            if issue.state == "closed":
+                raise UserError(f"#{issue_number} уже закрыт")
+            warnings: list[str] = []
+            login = await self.storage.github_links.get_login(user_id)
+            status = await self.issue_status(repo, issue)
+            assigned = await self._ensure_github_assignee(repo, issue, login, warnings)
+            task = await self.storage.tasks.upsert_active(
+                hack.id,
+                user_id,
+                issue.number,
+                issue.title,
+                issue.html_url,
+                status,
+                TASK_SOURCE_BOT,
+                assigned,
+            )
+            delivered = await self.messenger.send(
+                hack.chat_id,
+                f"📌 <b>Вам назначена задача</b> · {escape(hack.display_name)}\n"
+                f"{issue_link(issue.number, issue.title, issue.html_url)}\n"
+                f"Статус: {STATUS_TITLES[status]}\nМои задачи: /me → Мои задачи",
+                receiver_user_id=user_id,
+            )
+            if not delivered:
+                warnings.append(
+                    "Личное уведомление не доставлено. Задача доступна исполнителю в /me"
+                )
+            return TaskResult(task, issue, warnings)
 
     async def unassign(self, hack: Hackathon, user_id: int, issue_number: int) -> list[str]:
         task = await self.storage.tasks.get(hack.id, user_id, issue_number)

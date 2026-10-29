@@ -355,3 +355,31 @@ async def test_failed_reminder_is_not_marked_sent(env, monkeypatch):
         1440,
         180,
     }
+
+
+async def test_simultaneous_assignments_create_one_task_and_one_personal_notice(env, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from bot.services.tasks import TaskResult
+
+    env["github"].put(12)
+    sender = AsyncMock(wraps=env["bot"].send_message)
+    monkeypatch.setattr(env["bot"], "send_message", sender)
+    results = await asyncio.gather(
+        *(env["tasks"].assign(env["hack"], ALICE, 12) for _ in range(2)),
+        return_exceptions=True,
+    )
+    assert len([r for r in results if isinstance(r, TaskResult)]) == 1
+    assert len([r for r in results if isinstance(r, UserError)]) == 1
+    assert env["github"].added == [(12, ["alice-gh"])]
+    assert len(await env["storage"].tasks.active_for_hackathon(env["hack"].id)) == 1
+    sender.assert_awaited_once()
+    assert sender.await_args.kwargs["ephemeral_message_parameters"].receiver_user_id == ALICE
+
+
+async def test_personal_task_notice_cannot_be_sent_to_someone_elses_private_chat(env):
+    sender = env["tasks"].messenger
+    before = len(env["bot"].sent)
+    assert not await sender.send(ALICE, "Личная задача Bob", receiver_user_id=BOB)
+    assert len(env["bot"].sent) == before
