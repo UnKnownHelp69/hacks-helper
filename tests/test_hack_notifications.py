@@ -37,7 +37,11 @@ async def test_public_cards_and_team_notices_retry_and_then_deduplicate(storage)
     hack_id = await storage.workflow.save_hack(session, fields)
     api = CardBot()
     notifications = HackNotifications(
-        make_settings(), storage, api, UserDirectory(api, storage.users), Messenger(api)
+        make_settings(),
+        storage,
+        api,
+        UserDirectory(api, storage.users),
+        Messenger(api, make_settings()),
     )
     api.fail = True
     await notifications.flush()

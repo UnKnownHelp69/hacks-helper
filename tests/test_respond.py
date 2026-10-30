@@ -30,3 +30,15 @@ async def test_popups_are_bound_to_their_chat(storage):
     assert await storage.popups.get(popup_id, ALLOWED_CHAT) == "secret"
     assert await storage.popups.get(popup_id, FOREIGN_CHAT) is None
     assert await storage.popups.get(popup_id + 1, ALLOWED_CHAT) is None
+
+
+async def test_personal_reply_rejects_direct_messages_at_delivery_boundary():
+    import pytest
+    from aiogram.types import Chat
+
+    from bot.errors import UserError
+    from bot.respond import personal_reply
+    from tests.conftest import USER_ID, message
+
+    with pytest.raises(UserError, match="только внутри"):
+        await personal_reply(message("/help", chat=Chat(id=USER_ID, type="private")), "Секрет")

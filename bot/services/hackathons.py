@@ -73,10 +73,6 @@ class HackathonService:
     async def require_access(self, chat_id: int, user_id: int) -> None:
         if not self.settings.is_chat_allowed(chat_id):
             raise UserError("Этот чат не подключён к боту")
-        if chat_id > 0:
-            if chat_id != user_id:
-                raise UserError("Это личный чат другого пользователя")
-            return
         member = await self.directory.lookup(chat_id, user_id, force=True)
         if member.in_group is not True:
             raise UserError("Не удалось подтвердить, что вы участник этого чата. Попробуйте позже")

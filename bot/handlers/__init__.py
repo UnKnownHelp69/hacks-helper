@@ -16,7 +16,7 @@ from bot.handlers import (
 
 def build_router() -> Router:
     root = Router(name="root")
-    root.message.filter(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP, ChatType.PRIVATE}))
+    root.message.filter(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     root.include_routers(
         events.router,
         popups.router,

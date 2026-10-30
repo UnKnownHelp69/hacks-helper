@@ -1,4 +1,4 @@
-"""Personal replies: native ephemeral group messages, ordinary replies in private chats."""
+"""Personal replies using native ephemeral messages in the configured group."""
 
 from __future__ import annotations
 
@@ -91,31 +91,32 @@ def personal_options(event: Message | CallbackQuery, *, overlay: bool = False) -
     user = event.from_user
     if not isinstance(message, Message) or user is None or user.is_bot:
         raise UserError("Личный ответ недоступен. Отправьте /hack от своего имени")
+    if message.chat.type not in {"group", "supergroup"} or message.chat.id >= 0:
+        raise UserError("Бот работает только внутри подключённой группы")
     options: dict[str, Any] = {"chat_id": message.chat.id}
-    if message.chat.type in {"group", "supergroup"}:
-        if (
-            isinstance(event, CallbackQuery)
-            and message.receiver_user
-            and message.receiver_user.id != user.id
-        ):
-            raise UserError("Это личное сообщение другого пользователя")
-        options["ephemeral_message_parameters"] = EphemeralMessageParameters(
-            receiver_user_id=user.id,
-            callback_query_id=event.id if isinstance(event, CallbackQuery) else None,
-            replace_callback_query_message=(
-                overlay and message.ephemeral_message_id is None
-                if isinstance(event, CallbackQuery)
-                else False
-            ),
+    if (
+        isinstance(event, CallbackQuery)
+        and message.receiver_user
+        and message.receiver_user.id != user.id
+    ):
+        raise UserError("Это личное сообщение другого пользователя")
+    options["ephemeral_message_parameters"] = EphemeralMessageParameters(
+        receiver_user_id=user.id,
+        callback_query_id=event.id if isinstance(event, CallbackQuery) else None,
+        replace_callback_query_message=(
+            overlay and message.ephemeral_message_id is None
+            if isinstance(event, CallbackQuery)
+            else False
+        ),
+    )
+    if (
+        isinstance(event, Message)
+        and message.ephemeral_message_id is not None
+        and (datetime.now(UTC) - message.date).total_seconds() < 12
+    ):
+        options["reply_parameters"] = ReplyParameters(
+            ephemeral_message_id=message.ephemeral_message_id, allow_sending_without_reply=False
         )
-        if (
-            isinstance(event, Message)
-            and message.ephemeral_message_id is not None
-            and (datetime.now(UTC) - message.date).total_seconds() < 12
-        ):
-            options["reply_parameters"] = ReplyParameters(
-                ephemeral_message_id=message.ephemeral_message_id, allow_sending_without_reply=False
-            )
     return options
 
 
@@ -136,7 +137,7 @@ async def personal_reply(
             target = _panel_message(event, panel)
             if target is None and isinstance(event, CallbackQuery):
                 message = event.message
-                if message.ephemeral_message_id is not None or message.chat.type == "private":
+                if message.ephemeral_message_id is not None:
                     target = message
             if target is not None:
                 try:
@@ -180,35 +181,25 @@ async def edit_personal_reply(
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> Message | bool:
     """Edit a bot-owned progress panel, retaining the original personal recipient."""
-    options = personal_options(event)
+    personal_options(event)
     message = event.message if isinstance(event, CallbackQuery) else event
     if sent.chat.id != message.chat.id:
         raise UserError("Личное сообщение относится к другому чату")
-    if message.chat.type in {"group", "supergroup"}:
-        if (
-            sent.ephemeral_message_id is None
-            or sent.receiver_user is None
-            or sent.receiver_user.id != event.from_user.id
-        ):
-            raise UserError("Это личное сообщение другого пользователя")
-        method = event.bot.edit_ephemeral_message_text(
-            chat_id=message.chat.id,
-            receiver_user_id=event.from_user.id,
-            ephemeral_message_id=sent.ephemeral_message_id,
-            text=text,
-            parse_mode="HTML",
-            link_preview_options=NO_PREVIEW,
-            reply_markup=reply_markup,
-        )
-    else:
-        method = event.bot.edit_message_text(
-            chat_id=options["chat_id"],
-            message_id=sent.message_id,
-            text=text,
-            parse_mode="HTML",
-            link_preview_options=NO_PREVIEW,
-            reply_markup=reply_markup,
-        )
+    if (
+        sent.ephemeral_message_id is None
+        or sent.receiver_user is None
+        or sent.receiver_user.id != event.from_user.id
+    ):
+        raise UserError("Это личное сообщение другого пользователя")
+    method = event.bot.edit_ephemeral_message_text(
+        chat_id=message.chat.id,
+        receiver_user_id=event.from_user.id,
+        ephemeral_message_id=sent.ephemeral_message_id,
+        text=text,
+        parse_mode="HTML",
+        link_preview_options=NO_PREVIEW,
+        reply_markup=reply_markup,
+    )
     try:
         return await method
     except TelegramBadRequest as exc:

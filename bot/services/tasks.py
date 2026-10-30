@@ -107,6 +107,8 @@ class TaskService:
             if current.repo != hack.repo:
                 raise UserError("Репозиторий изменился. Откройте список задач заново")
             hack = current
+            if not self.settings.is_chat_allowed(hack.chat_id):
+                raise UserError("Этот чат не подключён к боту")
             repo = require_repo(hack)
             if not hack.is_active:
                 raise UserError("Хакатон в архиве")
@@ -149,6 +151,8 @@ class TaskService:
             return TaskResult(task, issue, warnings)
 
     async def unassign(self, hack: Hackathon, user_id: int, issue_number: int) -> list[str]:
+        if not self.settings.is_chat_allowed(hack.chat_id):
+            raise UserError("Этот чат не подключён к боту")
         task = await self.storage.tasks.get(hack.id, user_id, issue_number)
         if task is None or not task.active:
             raise UserError(f"Задачи #{issue_number} нет")
@@ -165,6 +169,8 @@ class TaskService:
     async def create_issue(
         self, hack: Hackathon, title: str, body: str | None, assignee_id: int | None
     ) -> TaskResult:
+        if not self.settings.is_chat_allowed(hack.chat_id):
+            raise UserError("Этот чат не подключён к боту")
         repo = require_repo(hack)
         if not hack.is_active:
             raise UserError("Хакатон в архиве")
@@ -196,7 +202,11 @@ class TaskService:
 
     async def sync_hackathon(self, hack: Hackathon, now: datetime | None = None) -> list[str]:
         """Sync tasks of one hackathon with GitHub. Returns notification lines."""
-        if not hack.repo or not self.github.configured:
+        if (
+            not self.settings.is_chat_allowed(hack.chat_id)
+            or not hack.repo
+            or not self.github.configured
+        ):
             return []
         now = now or utcnow()
         repo = hack.repo

@@ -2,9 +2,8 @@
 
 * Updates from chats that are not in ALLOWED_CHAT_IDS are dropped; if the bot
   finds itself in such a chat it leaves it without writing anything.
-* In private chats only /me is processed unless the chat is explicitly allowed.
-* Setup mode (ALLOWED_CHAT_IDS empty): only /help in groups and /me in
-  private chats are processed, and the bot leaves no chats.
+* Only one configured group is accepted. Private chats and channels are always ignored.
+* Without a configured group, no commands or callbacks are processed.
 * Bot admin status is computed here, centrally, from the user_id only.
 """
 
@@ -136,14 +135,14 @@ class SecurityMiddleware(BaseMiddleware):
         if update.my_chat_member:
             event = update.my_chat_member
             chat = event.chat
-            if chat.type == ChatType.PRIVATE:
+            if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP} or chat.id >= 0:
                 return False
             added = status_value(event.new_chat_member.status) in ACTIVE_STATUSES
             if settings.setup_mode:
                 if added:
                     log.warning(
                         "Setup mode: bot added to chat %s ('%s') by user %s. "
-                        "Send /help there to get its id for ALLOWED_CHAT_IDS.",
+                        "Set this group id as the only ALLOWED_CHAT_IDS value to enable it.",
                         chat.id,
                         chat.title,
                         event.from_user.id if event.from_user else None,
@@ -161,24 +160,25 @@ class SecurityMiddleware(BaseMiddleware):
             return False
         message = update.message
 
-        if chat.type == ChatType.PRIVATE:
-            return settings.is_chat_allowed(chat.id) or (
-                message is not None and command_name(message) == "me"
-            )
+        if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP} or chat.id >= 0:
+            return False
 
         # Group -> supergroup migration of an allowed chat.
-        if message is not None and not settings.setup_mode:
+        if (
+            message is not None
+            and not settings.setup_mode
+            and (message.migrate_from_chat_id or message.migrate_to_chat_id)
+        ):
             if message.migrate_from_chat_id and settings.is_chat_allowed(
                 message.migrate_from_chat_id
             ):
                 await self._migrate(message.migrate_from_chat_id, chat.id)
-                return False
-            if message.migrate_to_chat_id and settings.is_chat_allowed(chat.id):
+            elif message.migrate_to_chat_id and settings.is_chat_allowed(chat.id):
                 await self._migrate(chat.id, message.migrate_to_chat_id)
-                return False
+            return False
 
         if settings.setup_mode:
-            return message is not None and command_name(message) == "help"
+            return False
 
         if not settings.is_chat_allowed(chat.id):
             if chat.id not in self._left_chats and chat.type != ChatType.PRIVATE:
@@ -198,7 +198,8 @@ class SecurityMiddleware(BaseMiddleware):
     async def _migrate(self, old_chat_id: int, new_chat_id: int) -> None:
         # Both the old group and the new supergroup receive a service message;
         # handle the migration only once.
-        already_known = new_chat_id in self.settings.allowed_chat_ids
-        self.settings.allowed_chat_ids.add(new_chat_id)
-        if self.on_migrate is not None and not already_known:
+        if new_chat_id >= 0:
+            return
+        if self.on_migrate is not None:
             await self.on_migrate(old_chat_id, new_chat_id)
+        self.settings.allowed_chat_ids = {new_chat_id}

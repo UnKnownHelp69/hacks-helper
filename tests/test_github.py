@@ -219,3 +219,56 @@ def test_normalize_login():
     for bad in ("-bad", "a b", "x" * 40, "a/b"):
         with pytest.raises(UserError):
             normalize_login(bad)
+
+
+@pytest.mark.parametrize(
+    "next_url",
+    [
+        f"https://attacker.example/repos/{REPO}/issues?page=2",
+        f"http://api.github.com/repos/{REPO}/issues?page=2",
+        "https://api.github.com/user",
+        f"https://user:password@api.github.com/repos/{REPO}/issues?page=2",
+        "https://api.github.com/repos/other/project/issues?page=2",
+    ],
+)
+async def test_unsafe_pagination_is_blocked_before_sending_credentials(next_url):
+    from bot.services.github import GitHubError
+
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            200, json=[issue_json(1)], headers={"link": f'<{next_url}>; rel="next"'}
+        )
+
+    gh = client_for(handler)
+    try:
+        with pytest.raises(GitHubError):
+            await gh.list_open_issues(REPO)
+        assert len(requests) == 1
+        assert requests[0].url.host == "api.github.com"
+    finally:
+        await gh.close()
+
+
+async def test_github_redirects_are_not_followed():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(302, headers={"location": "https://attacker.example/token"})
+
+    gh = client_for(handler)
+    try:
+        with pytest.raises(GitHubUnavailable):
+            await gh.get_issue(REPO, 1)
+        assert len(requests) == 1
+    finally:
+        await gh.close()
+
+
+@pytest.mark.parametrize("repo", ["team/.", "team/..", "https://github.com/team/.."])
+def test_repository_path_traversal_is_rejected(repo):
+    with pytest.raises(UserError):
+        normalize_repo(repo)

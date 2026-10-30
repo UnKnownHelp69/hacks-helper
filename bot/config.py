@@ -63,10 +63,10 @@ def _parse_offsets(raw: str | None) -> list[int]:
 
 @dataclass
 class Settings:
-    bot_token: str
+    bot_token: str = field(repr=False)
     allowed_chat_ids: set[int] = field(default_factory=set)
     bot_admin_ids: frozenset[int] = field(default_factory=frozenset)
-    github_token: str | None = None
+    github_token: str | None = field(default=None, repr=False)
     llm_api_key: str | None = field(default=None, repr=False)
     llm_model: str = "openrouter/free"
     llm_base_url: str = "https://openrouter.ai/api/v1"
@@ -84,13 +84,19 @@ class Settings:
     log_level: str = "INFO"
     user_cache_ttl_seconds: int = 300
 
+    def __post_init__(self) -> None:
+        if len(self.allowed_chat_ids) > 1 or any(chat_id >= 0 for chat_id in self.allowed_chat_ids):
+            raise ConfigError(
+                "ALLOWED_CHAT_IDS must contain exactly one negative group id or be empty"
+            )
+
     @property
     def setup_mode(self) -> bool:
-        """True when ALLOWED_CHAT_IDS is empty: /help in groups and /me in private chats."""
+        """No group configured: all incoming updates and outgoing notifications are disabled."""
         return not self.allowed_chat_ids
 
     def is_chat_allowed(self, chat_id: int) -> bool:
-        return chat_id in self.allowed_chat_ids
+        return chat_id < 0 and len(self.allowed_chat_ids) == 1 and chat_id in self.allowed_chat_ids
 
     def is_admin_id(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.bot_admin_ids

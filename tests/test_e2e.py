@@ -291,7 +291,7 @@ async def answer_form(app, text, actor=ALICE, chat_id=ALLOWED_CHAT, **kwargs):
     await send(app, text, actor, chat_id, ephemeral=chat_id < 0, reply_to_message=prompt, **kwargs)
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, ADMIN_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_four_public_commands(app, chat_id):
     app["ctx"].settings.allowed_chat_ids.add(chat_id)
     await send(app, "/help@hacks_bot", chat_id=chat_id)
@@ -308,7 +308,7 @@ async def test_four_public_commands(app, chat_id):
     assert "Интеграция: настроена" in app["session"].last_text()
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, ADMIN_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_hack_list_and_card_are_chat_scoped(app, chat_id):
     app["ctx"].settings.allowed_chat_ids.add(chat_id)
     hack = await create_hack(app, chat_id, title="Хакатон <команды>")
@@ -354,7 +354,7 @@ async def test_personal_profile_is_delivered_only_to_requesting_user(app):
     assert f"id: {ADMIN_ID}" in await shown(app, ADMIN)
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_settings_are_in_me_and_return_to_profile(app, chat_id):
     app["ctx"].settings.allowed_chat_ids.add(chat_id)
     await app["storage"].users.set_llm_preference(USER_ID, "gigachat", "GigaChat-Pro")
@@ -403,7 +403,7 @@ async def test_expired_popup(app):
     assert answers[-1].text == "Ответ устарел, повторите команду"
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, ADMIN_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_removed_commands_are_not_handled(app, chat_id):
     app["ctx"].settings.allowed_chat_ids.add(chat_id)
     hack = await create_hack(app, chat_id)
@@ -475,7 +475,7 @@ async def test_foreign_chat_and_private(app):
     assert session.texts() == []
     await app["storage"].github_links.set_login(USER_ID, "alice-gh")
     await send(app, "/me", ALICE, chat_id=USER_ID)
-    assert session.last_text() == f"Ваш user_id: <code>{USER_ID}</code>"
+    assert session.texts() == []
     before = len(session.requests)
     for command in ("/help", "/hack", "/github", "/whoami"):
         await send(app, command, ALICE, chat_id=USER_ID)
@@ -483,21 +483,17 @@ async def test_foreign_chat_and_private(app):
     assert session.requests[before:] == []
 
 
-async def test_private_reminders_still_work(app):
-    app["ctx"].settings.allowed_chat_ids.add(ADMIN_ID)
+async def test_legacy_private_hackathons_never_send_background_notifications(app):
     hack = await create_hack(app, ADMIN_ID)
     await app["storage"].hackathons.add_member(hack.id, ADMIN_ID)
     await send(app, "/me", chat_id=ADMIN_ID)
-    now = datetime(2026, 12, 5, 6, 0, tzinfo=UTC)
-    await app["ctx"].reminders.tick(now)
-    assert "до начала хакатона" in app["session"].last_text()
-    assert "@admin_user" in app["session"].last_text()
-    count = len(app["session"].texts())
-    await app["ctx"].reminders.tick(now)
-    assert len(app["session"].texts()) == count
+    await app["ctx"].reminders.tick(datetime(2026, 12, 5, 6, 0, tzinfo=UTC))
+    await app["ctx"].hack_notifications.flush()
+    await app["ctx"].tasks.poll_all()
+    assert app["session"].requests == []
 
 
-async def test_setup_mode_uses_help_and_me(storage):
+async def test_unconfigured_bot_does_not_reply_in_any_chat(storage):
     settings = make_settings(allowed_chat_ids=set())
     session = MockSession()
     bot = Bot("123:TEST", session=session)
@@ -506,9 +502,9 @@ async def test_setup_mode_uses_help_and_me(storage):
     app = {"bot": bot, "dp": build_dispatcher(ctx), "session": session}
     try:
         await send(app, "/help", ALICE, chat_id=FOREIGN_CHAT)
-        assert f"<code>{FOREIGN_CHAT}</code>" in session.last_text()
+        assert session.texts() == []
         await send(app, "/me", ALICE, chat_id=USER_ID)
-        assert session.last_text() == f"Ваш user_id: <code>{USER_ID}</code>"
+        assert session.texts() == []
         count = len(session.texts())
         await send(app, "/hack", ALICE, chat_id=FOREIGN_CHAT)
         await send(app, "/github", ALICE, chat_id=USER_ID)
@@ -790,7 +786,7 @@ async def test_personal_delivery_failure_never_falls_back_to_public_message(app,
     assert sends and all(method.ephemeral_message_parameters for method in sends)
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_import_progress_stays_personal_and_fills_fields_before_completion(
     app,
     monkeypatch,
@@ -893,7 +889,7 @@ async def test_expired_progress_panel_is_replaced_only_with_private_failure(app,
     assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_commands_manual_form_and_result_reuse_one_personal_message(app, chat_id):
     app["ctx"].settings.allowed_chat_ids.add(chat_id)
     await send(app, "/hack", ALICE, chat_id)
@@ -1034,7 +1030,7 @@ async def test_invalid_manual_dates_are_retried_on_same_panel_before_creation(ap
     assert len(personal) == 1
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_compact_cards_hide_checkpoint_details_and_open_them_privately_in_place(app, chat_id):
     app["ctx"].settings.allowed_chat_ids.add(chat_id)
     await send(app, "/hack", ALICE, chat_id)
@@ -1101,7 +1097,7 @@ async def test_empty_checkpoint_list_does_not_add_buttons_to_cards(app):
     assert "чекпоинт" not in text.lower()
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 @pytest.mark.parametrize("answer", [None, "Незавершённый хакатон"])
 async def test_cancel_creation_works_on_current_prompt_without_leaving_the_panel(
     app, chat_id, answer
@@ -1145,7 +1141,7 @@ async def test_cancel_edit_prompt_returns_to_card_without_changing_hackathon(app
     assert "Введите:" not in private_panel(app).text
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 @pytest.mark.parametrize("choice", [None, "yes", "no", "maybe"])
 async def test_participation_button_matches_membership_in_personal_and_shared_cards(
     app, chat_id, choice
@@ -1177,7 +1173,7 @@ async def test_participation_button_matches_membership_in_personal_and_shared_ca
         assert "Хакатоны" in private_panel(app, chat_id=chat_id).text
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_participation_buttons_switch_in_place_after_joining_and_leaving(app, chat_id):
     app["ctx"].settings.allowed_chat_ids.add(chat_id)
     hack = await create_hack(app, chat_id=chat_id)
@@ -1220,7 +1216,7 @@ async def test_team_page_does_not_offer_join_again_after_registration_closes(app
     )
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_team_list_shows_all_rosters_with_telegram_aliases_in_place(app, chat_id):
     from tests.test_hack_workflow import draft
 
@@ -1310,7 +1306,7 @@ async def open_task_assignment(app, hack, actor=ALICE, chat_id=ALLOWED_CHAT):
     await click(app, "#12", actor, chat_id)
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_issue_assignment_notifies_assignee_and_shows_personal_tasks_in_place(app, chat_id):
     import asyncio
     from unittest.mock import AsyncMock
@@ -1474,7 +1470,7 @@ async def test_saved_tasks_are_visible_when_github_is_disconnected_and_scoped_to
     )
 
 
-@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT, USER_ID])
+@pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
 async def test_github_account_can_be_linked_changed_and_unlinked_privately(app, chat_id):
     app["ctx"].settings.allowed_chat_ids.add(chat_id)
     await send(app, "/me", ALICE, chat_id)
@@ -1599,3 +1595,36 @@ async def test_issue_selection_rejects_unlisted_numbers_and_another_users_button
     await press(app, forged, ALICE, source=panel)
     assert "из текущего списка" in private_panel(app).text
     assert await app["storage"].tasks.active_for_hackathon(hack.id) == []
+
+
+@pytest.mark.parametrize("kind", ["command", "text", "edited", "callback"])
+async def test_private_updates_cannot_access_services_or_write_registry(app, kind):
+    from unittest.mock import AsyncMock
+
+    app["ctx"].github.get_issue = AsyncMock(side_effect=AssertionError("GitHub must not be called"))
+    if kind == "command":
+        for command in ("/help", "/hack", "/me", "/github", "/start"):
+            await send(app, command, ALICE, USER_ID)
+    elif kind == "text":
+        await send(app, "https://github.com/team/project/issues/12", ALICE, USER_ID)
+    elif kind == "edited":
+        edited = Message(
+            message_id=1,
+            date=datetime.now(UTC),
+            chat=Chat(id=USER_ID, type="private"),
+            from_user=ALICE,
+            text="/hack",
+        )
+        await app["dp"].feed_update(app["bot"], Update(update_id=next(_ids), edited_message=edited))
+    else:
+        for data in ("my:tasks", "hm:1", "hv:1:yes", "me:forged:0:github:"):
+            await press(app, data, ALICE, USER_ID)
+    assert app["session"].requests == []
+    assert await app["storage"].users.get(USER_ID) is None
+    assert await app["storage"].workflow.session(USER_ID) is None
+
+
+async def test_legacy_cached_popup_does_not_disclose_ownerless_personal_data(app):
+    popup_id = await app["storage"].popups.add(ALLOWED_CHAT, "Чужая личная задача")
+    responses = await press(app, f"pop:{popup_id}", ALICE)
+    assert not any("Чужая личная задача" in str(response) for response in responses)

@@ -64,7 +64,7 @@ def build_context(
     github = github or GitHubClient(settings.github_token)
     directory = UserDirectory(bot, storage.users, settings.user_cache_ttl_seconds)
     pinger = Pinger(directory, storage.availability)
-    messenger = Messenger(bot)
+    messenger = Messenger(bot, settings)
     tasks = TaskService(settings, storage, github, pinger, messenger)
     reminders = ReminderService(settings, storage, pinger, messenger)
     archive = ArchiveService(settings, storage, tasks)
@@ -97,17 +97,21 @@ def build_dispatcher(
 
 
 async def apply_known_migrations(settings: Settings, storage: Storage) -> None:
-    """Allow chats that were migrated to supergroups while the old id is still configured."""
-    for old_id, new_id in (await storage.chats.get_migrations()).items():
-        if old_id in settings.allowed_chat_ids and new_id not in settings.allowed_chat_ids:
-            settings.allowed_chat_ids.add(new_id)
-            log.warning(
-                "Chat %s was migrated to supergroup %s. Replace %s with %s in ALLOWED_CHAT_IDS.",
-                old_id,
-                new_id,
-                old_id,
-                new_id,
-            )
+    """Follow persisted migration chains without authorizing two groups at once."""
+    migrations = await storage.chats.get_migrations()
+    seen: set[int] = set()
+    while settings.allowed_chat_ids:
+        old_id = next(iter(settings.allowed_chat_ids))
+        if old_id not in migrations:
+            return
+        new_id = migrations[old_id]
+        if old_id in seen or new_id >= 0:
+            settings.allowed_chat_ids.clear()
+            log.error("Invalid group migration chain; configure ALLOWED_CHAT_IDS again")
+            return
+        seen.add(old_id)
+        settings.allowed_chat_ids = {new_id}
+        log.warning("Chat %s migrated to %s; update ALLOWED_CHAT_IDS", old_id, new_id)
 
 
 async def wait_for_telegram(bot: Bot) -> None:
@@ -135,8 +139,7 @@ async def check_bot_rights(bot: Bot, settings: Settings) -> None:
         "off" if me.can_read_all_group_messages else "on",
     )
     for chat_id in sorted(settings.allowed_chat_ids):
-        if chat_id > 0:
-            log.info("Private chat %s enabled", chat_id)
+        if not settings.is_chat_allowed(chat_id):
             continue
         try:
             member = await bot.get_chat_member(chat_id, me.id)
@@ -166,28 +169,27 @@ async def check_bot_rights(bot: Bot, settings: Settings) -> None:
 
 async def register_commands(bot: Bot, settings: Settings) -> None:
     """Replace global and chat-specific menus, including earlier command overrides."""
-    commands = bot_commands()
     scopes = [
         BotCommandScopeDefault(),
         BotCommandScopeAllGroupChats(),
         BotCommandScopeAllPrivateChats(),
-        *(BotCommandScopeChat(chat_id=chat_id) for chat_id in sorted(settings.allowed_chat_ids)),
     ]
     for scope in scopes:
-        await bot.set_my_commands(commands, scope=scope)
+        await bot.set_my_commands([], scope=scope)
+    for chat_id in sorted(settings.allowed_chat_ids):
+        if settings.is_chat_allowed(chat_id):
+            await bot.set_my_commands(bot_commands(), scope=BotCommandScopeChat(chat_id=chat_id))
 
 
 async def run(settings: Settings) -> None:
     if settings.setup_mode:
         log.warning(
-            "ALLOWED_CHAT_IDS is empty: SETUP MODE. The bot leaves no chats and only answers "
-            "/help in groups and /me in private chats. Put your chat id into "
-            "ALLOWED_CHAT_IDS and restart the bot."
+            "ALLOWED_CHAT_IDS is empty: all commands and notifications are disabled. "
+            "Configure one negative group id and restart the bot."
         )
     if not settings.bot_admin_ids:
         log.warning(
-            "BOT_ADMIN_IDS is empty: nobody can run admin actions. Send /me to the bot "
-            "in a private chat to learn your user_id."
+            "BOT_ADMIN_IDS is empty: nobody can run admin actions. Use /me in the configured group."
         )
     if not settings.github_token:
         log.warning("GITHUB_TOKEN is empty: GitHub features are disabled")
@@ -227,11 +229,6 @@ async def _run_bot(settings: Settings, storage: Storage) -> None:
             old_chat_id,
             new_chat_id,
         )
-        await ctx.messenger.send(
-            new_chat_id,
-            f"ℹ️ Новый chat_id группы: <code>{new_chat_id}</code>. "
-            "Замените старый id в ALLOWED_CHAT_IDS.",
-        )
 
     dp = build_dispatcher(ctx, on_migrate)
     scheduler = create_scheduler(
@@ -242,6 +239,12 @@ async def _run_bot(settings: Settings, storage: Storage) -> None:
         await wait_for_telegram(bot)
         try:
             await register_commands(bot, settings)
+            legacy_private_chats = await storage.db.fetchall(
+                "SELECT DISTINCT chat_id FROM hackathons WHERE chat_id>0 "
+                "UNION SELECT DISTINCT chat_id FROM hack_sessions WHERE chat_id>0"
+            )
+            for row in legacy_private_chats:
+                await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=row["chat_id"]))
         except Exception as exc:
             log.warning("set_my_commands failed: %s", exc)
         if not settings.setup_mode:

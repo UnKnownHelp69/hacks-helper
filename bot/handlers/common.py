@@ -30,23 +30,12 @@ button = partial(session_button, "me")
 async def cmd_help(message: Message, ctx: AppContext) -> None:
     if message.from_user and ctx.settings.is_chat_allowed(message.chat.id):
         await ctx.storage.workflow.clear_forms(message.from_user.id, message.chat.id)
-    if ctx.settings.setup_mode:
-        await reply(
-            message,
-            f"chat_id: <code>{message.chat.id}</code>\n"
-            "Добавьте в ALLOWED_CHAT_IDS и перезапустите бота.",
-        )
-        return
     await reply(message, HELP_TEXT)
 
 
 @router.message(Command("me"))
 async def cmd_me(message: Message, ctx: AppContext) -> None:
     assert message.from_user is not None
-    if not ctx.settings.is_chat_allowed(message.chat.id):
-        # Before setup, reveal only the caller's own id, without reusable buttons.
-        await reply(message, f"Ваш user_id: <code>{message.from_user.id}</code>")
-        return
     await ctx.storage.workflow.clear_forms(message.from_user.id, message.chat.id)
     await profile(message, ctx)
 
@@ -256,7 +245,7 @@ async def github_input_session(message: Message, ctx: AppContext) -> dict | bool
 async def github_input(message: Message, ctx: AppContext, github_session: HackSession) -> None:
     session = github_session
     await ctx.hacks.require_access(session.chat_id, session.user_id)
-    if message.chat.type != "private" and message.ephemeral_message_id is None:
+    if message.ephemeral_message_id is None:
         await github_prompt(message, ctx, session, "Ответьте в личной панели бота")
         return
     if message.reply_to_message is not None:

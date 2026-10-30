@@ -563,7 +563,7 @@ async def hack_input(message: Message, ctx: AppContext) -> None:
     if actor is None or actor.is_bot:
         return
     session = await ctx.storage.workflow.session(actor.id, chat_id=message.chat.id)
-    private_input = message.chat.type == "private" or message.ephemeral_message_id is not None
+    private_input = message.ephemeral_message_id is not None
     if session and session.step.startswith("form:") and private_input:
         await ctx.hacks.require_access(session.chat_id, actor.id)
         field = session.step.split(":", 1)[1]

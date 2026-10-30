@@ -76,7 +76,7 @@ async def env(storage, fake_bot):
     github = FakeGitHub()
     directory = UserDirectory(fake_bot, storage.users)
     pinger = Pinger(directory, storage.availability)
-    messenger = Messenger(fake_bot)
+    messenger = Messenger(fake_bot, settings)
     tasks = TaskService(settings, storage, github, pinger, messenger)  # type: ignore[arg-type]
     reminders = ReminderService(settings, storage, pinger, messenger)
     archive = ArchiveService(settings, storage, tasks)
@@ -383,3 +383,26 @@ async def test_personal_task_notice_cannot_be_sent_to_someone_elses_private_chat
     before = len(env["bot"].sent)
     assert not await sender.send(ALICE, "Личная задача Bob", receiver_user_id=BOB)
     assert len(env["bot"].sent) == before
+
+
+@pytest.mark.parametrize("chat_id", [ALICE, -99999])
+async def test_task_service_cannot_modify_github_for_unconfigured_chats(env, chat_id):
+    from dataclasses import replace
+
+    hack = env["hack"]
+    await env["storage"].db.execute(
+        "UPDATE hackathons SET chat_id=? WHERE id=?", (chat_id, hack.id)
+    )
+    hack = replace(hack, chat_id=chat_id)
+    env["github"].put(12)
+    with pytest.raises(UserError, match="чат не подключён"):
+        await env["tasks"].assign(hack, ALICE, 12)
+    with pytest.raises(UserError, match="чат не подключён"):
+        await env["tasks"].create_issue(hack, "Issue", None, ALICE)
+    with pytest.raises(UserError, match="чат не подключён"):
+        await env["tasks"].unassign(hack, ALICE, 12)
+    assert await env["tasks"].sync_hackathon(hack) == []
+    assert not await env["tasks"].messenger.send(chat_id, "Личная задача", receiver_user_id=ALICE)
+    assert not await env["tasks"].messenger.send(chat_id, "Общее сообщение")
+    assert env["github"].added == [] and env["github"].removed == []
+    assert await env["storage"].tasks.active_for_hackathon(hack.id) == []

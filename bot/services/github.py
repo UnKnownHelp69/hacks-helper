@@ -88,7 +88,7 @@ def normalize_repo(raw: str) -> str:
     url_match = _REPO_URL_RE.match(raw)
     if url_match:
         raw = f"{url_match.group(1)}/{url_match.group(2)}"
-    if not _REPO_RE.match(raw):
+    if not _REPO_RE.match(raw) or raw.rsplit("/", 1)[-1] in {".", ".."}:
         raise UserError(
             f"Неверный репозиторий «{escape(raw)}». Формат: owner/repo или ссылка на github.com"
         )
@@ -130,6 +130,7 @@ class GitHubClient:
             base_url=base_url,
             transport=transport,
             timeout=timeout,
+            follow_redirects=False,
             headers={
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
@@ -200,11 +201,22 @@ class GitHubClient:
 
     async def _request(self, method: str, url: str, what: str, **kwargs: Any) -> httpx.Response:
         self._check_ready()
+        target = self._client.build_request(method, url).url
+        base = self._client.base_url
+        if (
+            (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port)
+            or target.scheme != "https"
+            or target.username
+            or target.password
+        ):
+            raise GitHubError("GitHub вернул ссылку за пределами своего API")
         try:
             response = await self._client.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
             log.warning("GitHub request failed: %s %s: %s", method, url, type(exc).__name__)
             raise GitHubUnavailable("GitHub сейчас недоступен (ошибка сети)") from exc
+        if 300 <= response.status_code < 400 and response.status_code != 304:
+            raise GitHubUnavailable("GitHub вернул перенаправление; запрос остановлен")
         if response.status_code != 304:
             self._raise_for_response(response, what)
         return response
@@ -238,7 +250,10 @@ class GitHubClient:
         next_url: str | None = url
         current_params: dict[str, Any] | None = params
         pages = 0
+        expected_path = self._client.build_request("GET", url).url.path
         while next_url and pages < max_pages:
+            if self._client.build_request("GET", next_url).url.path != expected_path:
+                raise GitHubError("GitHub вернул страницу другого ресурса; запрос остановлен")
             data, next_url = await self._get(next_url, what, current_params)
             current_params = None  # the "next" link already contains the query
             items.extend(data)

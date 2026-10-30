@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram.types import EphemeralMessageParameters, LinkPreviewOptions
 
+from bot.config import Settings
 from bot.db.repositories import AvailabilityRepo
 from bot.services.availability import deserialize_schedule, is_available, next_available
 from bot.services.formatting import split_message
@@ -25,18 +26,18 @@ class MessageApi(Protocol):
 class Messenger:
     """Sends HTML messages to chats; never raises (errors are logged)."""
 
-    def __init__(self, api: MessageApi) -> None:
+    def __init__(self, api: MessageApi, settings: Settings) -> None:
         self.api = api
+        self.settings = settings
 
     async def send(self, chat_id: int, text: str, *, receiver_user_id: int | None = None) -> bool:
+        if not self.settings.is_chat_allowed(chat_id):
+            return False
         options: dict[str, Any] = {}
         if receiver_user_id is not None:
-            if chat_id > 0 and chat_id != receiver_user_id:
-                return False
-            if chat_id < 0:
-                options["ephemeral_message_parameters"] = EphemeralMessageParameters(
-                    receiver_user_id=receiver_user_id
-                )
+            options["ephemeral_message_parameters"] = EphemeralMessageParameters(
+                receiver_user_id=receiver_user_id
+            )
         ok = True
         for chunk in split_message(text):
             try:
