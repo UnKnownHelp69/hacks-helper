@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from html import unescape
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from bot.context import AppContext
 
 POPUP_LIMIT = 200
+PANEL_LIFETIME = timedelta(minutes=10)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -37,6 +38,7 @@ _TAG_RE = re.compile(r"<[^>]+>")
 class PersonalPanel:
     message_id: int | None = None
     ephemeral_id: int | None = None
+    created_at: datetime | None = None
     revision: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -62,7 +64,7 @@ def _panel_message(event: Message | CallbackQuery, panel: PersonalPanel) -> Mess
         message_id=panel.message_id,
         ephemeral_message_id=panel.ephemeral_id,
         receiver_user=event.from_user if panel.ephemeral_id is not None else None,
-        date=datetime.now(UTC),
+        date=panel.created_at or datetime.now(UTC),
         chat=message.chat,
     )
 
@@ -70,6 +72,7 @@ def _panel_message(event: Message | CallbackQuery, panel: PersonalPanel) -> Mess
 def _remember_panel(event: Message | CallbackQuery, sent: Message) -> None:
     panel = _panel(event)
     panel.message_id, panel.ephemeral_id = sent.message_id, sent.ephemeral_message_id
+    panel.created_at = sent.date
 
 
 def personal_panel_revision(event: Message | CallbackQuery) -> int:
@@ -139,6 +142,9 @@ async def personal_reply(
                 message = event.message
                 if message.ephemeral_message_id is not None:
                     target = message
+            if target is not None and datetime.now(UTC) - target.date > PANEL_LIFETIME:
+                target = None
+                options = personal_options(event, overlay=False)
             if target is not None:
                 try:
                     await edit_personal_reply(event, target, text, reply_markup=reply_markup)

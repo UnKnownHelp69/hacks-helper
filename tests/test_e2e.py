@@ -65,7 +65,7 @@ class MockSession(BaseSession):
 
     async def make_request(self, bot: Bot, method: TelegramMethod[Any], timeout: int | None = None):
         self.requests.append(method)
-        now = datetime(2026, 10, 26, tzinfo=UTC)
+        now = datetime.now(UTC)
         if isinstance(method, (SendMessage, SendDocument)):
             ephemeral = getattr(method, "ephemeral_message_parameters", None)
             identifier = next(_ids)
@@ -1628,3 +1628,99 @@ async def test_legacy_cached_popup_does_not_disclose_ownerless_personal_data(app
     popup_id = await app["storage"].popups.add(ALLOWED_CHAT, "Чужая личная задача")
     responses = await press(app, f"pop:{popup_id}", ALICE)
     assert not any("Чужая личная задача" in str(response) for response in responses)
+
+
+@pytest.fixture
+def panel_clock(monkeypatch):
+    import sys
+
+    import bot.respond
+
+    current = [datetime.now(UTC).replace(microsecond=0)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return current[0].astimezone(tz) if tz is not None else current[0].replace(tzinfo=None)
+
+    monkeypatch.setattr(bot.respond, "datetime", Clock)
+    monkeypatch.setattr(sys.modules[__name__], "datetime", Clock)
+    return current
+
+
+@pytest.mark.parametrize("elapsed", [599, 600, 601])
+async def test_personal_panel_is_replaced_only_after_ten_minutes(app, panel_clock, elapsed):
+    from datetime import timedelta
+
+    await send(app, "/me", ALICE)
+    original = private_panel(app)
+    panel_clock[0] += timedelta(seconds=elapsed)
+    await send(app, "/hack", ALICE)
+    current = private_panel(app)
+    assert (current.ephemeral_message_id != original.ephemeral_message_id) == (elapsed > 600)
+    await send(app, "/me", ALICE)
+    assert private_panel(app).ephemeral_message_id == current.ephemeral_message_id
+    sent = [r for r in app["session"].requests if isinstance(r, SendMessage)]
+    assert len(sent) == (2 if elapsed > 600 else 1)
+    assert all(r.ephemeral_message_parameters.receiver_user_id == USER_ID for r in sent)
+
+
+async def test_panel_age_is_not_extended_by_edits_and_form_continues_on_new_panel(app, panel_clock):
+    from datetime import timedelta
+
+    await send(app, "/hack", ALICE)
+    initial = private_panel(app)
+    panel_clock[0] += timedelta(minutes=9)
+    await click(app, "Создать вручную")
+    assert private_panel(app).ephemeral_message_id == initial.ephemeral_message_id
+    panel_clock[0] += timedelta(seconds=61)
+    await answer_form(app, "Новая панель")
+    current = private_panel(app)
+    assert current.ephemeral_message_id != initial.ephemeral_message_id
+    assert "Конец регистрации" in current.text
+    session = await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)
+    assert session.data["_prompt_id"] == current.ephemeral_message_id
+    await click(app, "Отмена")
+    assert "Хакатоны" in private_panel(app).text
+    assert private_panel(app).ephemeral_message_id == current.ephemeral_message_id
+
+
+async def test_expired_callback_panel_is_not_reused_after_cache_loss(app, panel_clock):
+    from datetime import timedelta
+
+    from bot.respond import _PANELS
+
+    await send(app, "/me", ALICE)
+    initial = private_panel(app)
+    _PANELS[app["bot"].session].clear()
+    panel_clock[0] += timedelta(seconds=601)
+    await click(app, "Мои задачи")
+    current = private_panel(app)
+    assert current.ephemeral_message_id != initial.ephemeral_message_id
+    latest = next(r for r in reversed(app["session"].requests) if isinstance(r, SendMessage))
+    assert latest.ephemeral_message_parameters.receiver_user_id == USER_ID
+    assert not latest.ephemeral_message_parameters.replace_callback_query_message
+    await click(app, "К профилю")
+    assert private_panel(app).ephemeral_message_id == current.ephemeral_message_id
+
+
+async def test_expired_panel_rotates_once_under_concurrent_actions_and_keeps_other_users_panel(
+    app, panel_clock
+):
+    import asyncio
+    from datetime import timedelta
+
+    await send(app, "/me", ALICE)
+    initial = private_panel(app)
+    panel_clock[0] += timedelta(seconds=60)
+    bob = tg_user(3003, "bob_tg")
+    await send(app, "/me", bob)
+    bobs_panel = private_panel(app, bob)
+    panel_clock[0] += timedelta(seconds=541)
+    await asyncio.gather(send(app, "/help", ALICE), send(app, "/me", ALICE))
+    assert private_panel(app).ephemeral_message_id != initial.ephemeral_message_id
+    await send(app, "/me", bob)
+    assert private_panel(app, bob).ephemeral_message_id == bobs_panel.ephemeral_message_id
+    sends = [r for r in app["session"].requests if isinstance(r, SendMessage)]
+    assert len(sends) == 3
+    assert all(r.ephemeral_message_parameters for r in sends)
