@@ -123,6 +123,58 @@ async def test_not_configured():
     await gh.close()
 
 
+@pytest.mark.parametrize("status", [200, 404])
+async def test_public_profile_can_be_checked_without_token(status):
+    def handler(request):
+        assert str(request.url) == "https://api.github.com/users/Aydar-art"
+        assert "authorization" not in request.headers
+        return httpx.Response(status, json={"login": "Aydar-art"})
+
+    gh = GitHubClient(None, transport=httpx.MockTransport(handler))
+    try:
+        assert await gh.user_exists("https://github.com/Aydar-art") is (status == 200)
+        assert not gh.configured
+        with pytest.raises(GitHubNotConfigured):
+            await gh.add_assignees(REPO, 1, ["Aydar-art"])
+        with pytest.raises(GitHubNotConfigured):
+            await gh.get_repo(REPO)
+    finally:
+        await gh.close()
+
+
+async def test_public_profile_lookup_still_obeys_rate_limits():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(429, headers={"retry-after": "30"})
+
+    gh = GitHubClient(None, transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(GitHubRateLimited):
+            await gh.user_exists("Aydar-art")
+        with pytest.raises(GitHubRateLimited):
+            await gh.user_exists("Aydar-art")
+        assert len(calls) == 1
+    finally:
+        await gh.close()
+
+
+@pytest.mark.parametrize(
+    "login", ["../repos/team/project", "Aydar-art/repos", "https://evil.example/x"]
+)
+async def test_invalid_profile_lookup_never_sends_a_request(login):
+    def handler(request):
+        pytest.fail("Invalid account must not reach GitHub")
+
+    gh = GitHubClient(None, transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(UserError):
+            await gh.user_exists(login)
+    finally:
+        await gh.close()
+
+
 async def test_pull_request_is_not_an_issue():
     gh = client_for(lambda r: httpx.Response(200, json=issue_json(3, pr=True)))
     with pytest.raises(GitHubNotFound):

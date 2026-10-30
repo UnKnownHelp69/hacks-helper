@@ -1576,6 +1576,31 @@ async def test_github_account_can_be_linked_changed_and_unlinked_privately(app, 
     assert await app["storage"].github_links.get_login(USER_ID) is None
 
 
+async def test_public_github_profile_is_linked_privately_without_integration_token(app):
+    def handler(request):
+        assert str(request.url) == "https://api.github.com/users/Aydar-art"
+        assert "authorization" not in request.headers
+        return httpx.Response(200, json={"login": "Aydar-art"})
+
+    github = GitHubClient(None, transport=httpx.MockTransport(handler))
+    app["ctx"].github = github
+    try:
+        await send(app, "/me", ALICE)
+        await click(app, "Аккаунт GitHub")
+        await click(app, "Привязать аккаунт")
+        panel = private_panel(app)
+        await answer_form(app, "https://github.com/Aydar-art")
+        assert await app["storage"].github_links.get_login(USER_ID) == "Aydar-art"
+        assert private_panel(app).ephemeral_message_id == panel.ephemeral_message_id
+        assert not github.configured
+        assert all(
+            not isinstance(method, SendMessage) or method.ephemeral_message_parameters
+            for method in app["session"].requests
+        )
+    finally:
+        await github.close()
+
+
 async def test_github_link_duplicate_and_invalid_input_preserve_previous_account(app):
     await app["storage"].github_links.set_login(USER_ID, "old-alice")
     await app["storage"].github_links.set_login(3003, "bob-gh")

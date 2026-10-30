@@ -150,8 +150,8 @@ class GitHubClient:
 
     # --- low level ---
 
-    def _check_ready(self) -> None:
-        if not self.token:
+    def _check_ready(self, *, public_profile: bool = False) -> None:
+        if not self.token and not public_profile:
             raise GitHubNotConfigured("GitHub не настроен: не задан GITHUB_TOKEN")
         if self.blocked_until > time.time():
             wait = int(self.blocked_until - time.time()) + 1
@@ -200,7 +200,6 @@ class GitHubClient:
         raise GitHubError(f"Ошибка GitHub {status} ({escape(what)})")
 
     async def _request(self, method: str, url: str, what: str, **kwargs: Any) -> httpx.Response:
-        self._check_ready()
         target = self._client.build_request(method, url).url
         base = self._client.base_url
         if (
@@ -210,6 +209,13 @@ class GitHubClient:
             or target.password
         ):
             raise GitHubError("GitHub вернул ссылку за пределами своего API")
+        # Checking a public account needs no token; all repository operations still do.
+        public_profile = (
+            method == "GET"
+            and target.path.startswith("/users/")
+            and _LOGIN_RE.fullmatch(target.path.removeprefix("/users/")) is not None
+        )
+        self._check_ready(public_profile=public_profile)
         try:
             response = await self._client.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
@@ -267,6 +273,7 @@ class GitHubClient:
         return data
 
     async def user_exists(self, login: str) -> bool:
+        login = normalize_login(login)
         try:
             await self._get(f"/users/{login}", f"пользователь GitHub {login}")
         except GitHubNotFound:

@@ -192,7 +192,7 @@ async def run(settings: Settings) -> None:
             "BOT_ADMIN_IDS is empty: nobody can run admin actions. Use /me in the configured group."
         )
     if not settings.github_token:
-        log.warning("GITHUB_TOKEN is empty: GitHub features are disabled")
+        log.warning("GITHUB_TOKEN is empty: GitHub repository integration is disabled")
 
     db = Database(settings.database_path)
     await db.connect()
