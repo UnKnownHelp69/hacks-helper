@@ -52,7 +52,7 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
         session = await ctx.storage.workflow.new_session(event.from_user.id, message.chat.id)
     scope = session.data.get("list", "finished" if session.data.get("archive") else "mine")
     if scope == "mine":
-        hacks = await ctx.storage.hackathons.list_ongoing_for_user(session.chat_id, session.user_id)
+        hacks = await ctx.storage.hackathons.list_active_for_user(session.chat_id, session.user_id)
     else:
         now = utcnow()
         hacks = [
@@ -97,9 +97,11 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
         "finished": "Каталог · Архивные хакатоны",
     }[scope]
     if scope == "mine":
-        description = "Текущие хакатоны, на которые вы зарегистрированы."
+        description = "Ваши зарегистрированные хакатоны: предстоящие и текущие."
         if not hacks:
-            description += "\nУ вас нет текущих хакатонов. Зарегистрироваться можно в каталоге."
+            description += (
+                "\nУ вас пока нет активных хакатонов. Зарегистрироваться можно в каталоге."
+            )
     elif scope == "finished":
         description = "Хакатоны завершились. Регистрация недоступна." if hacks else "Архив пуст."
     else:

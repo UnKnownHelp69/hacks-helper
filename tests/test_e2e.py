@@ -302,7 +302,7 @@ async def test_four_public_commands(app, chat_id):
     await send(app, "/me", chat_id=chat_id)
     assert f"id: {ADMIN_ID}" in await shown(app, ADMIN)
     await send(app, "/hack", chat_id=chat_id)
-    assert "У вас нет текущих хакатонов" in await shown(app, ADMIN)
+    assert "У вас пока нет активных хакатонов" in await shown(app, ADMIN)
     await send(app, "/github", chat_id=chat_id)
     assert "Аккаунт: не привязан" in app["session"].last_text()
     assert "Интеграция: настроена" in app["session"].last_text()
@@ -399,7 +399,7 @@ async def test_hack_catalog_lists_cards_as_personal_buttons(app):
     assert all(any(f"hack{index}" in label for label in labels) for index in range(3))
 
 
-async def test_personal_hack_menu_only_lists_registered_ongoing_events_for_each_user(app):
+async def test_personal_hack_menu_lists_registered_upcoming_and_current_events_for_each_user(app):
     now = datetime.now(UTC)
     storage = app["storage"]
     mine = await storage.hackathons.create(
@@ -428,7 +428,7 @@ async def test_personal_hack_menu_only_lists_registered_ongoing_events_for_each_
         panel = private_panel(app, actor)
         names = [b.text for row in panel.reply_markup.inline_keyboard for b in row]
         assert expected.title in names and excluded.title not in names
-        assert upcoming.title not in names
+        assert (upcoming.title in names) == (actor.id == USER_ID)
         assert panel.receiver_user.id == actor.id
         await click(app, "Каталог", actor)
         names = [
@@ -456,7 +456,7 @@ async def test_catalog_tabs_and_pagination_edit_same_panel_and_reset_page(app):
     names = [b.text for row in private_panel(app).reply_markup.inline_keyboard for b in row]
     assert "Catalog 0" in names and "Catalog 8" not in names
     await click(app, "Мои активные")
-    assert "У вас нет текущих хакатонов" in private_panel(app).text
+    assert "У вас пока нет активных хакатонов" in private_panel(app).text
     assert private_panel(app).ephemeral_message_id == panel_id
 
 
