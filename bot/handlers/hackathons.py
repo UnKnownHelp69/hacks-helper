@@ -63,10 +63,13 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
     page = min(max(int(session.data.get("page", 0)), 0), max(0, (len(hacks) - 1) // 8))
     rows = []
     if scope != "mine":
-        tabs = [button(session, "Активные", "catalog_active")]
-        if scope != "finished":
-            tabs.append(button(session, "Архивные", "catalog_archive"))
-        rows.append(tabs)
+        rows.append(
+            [
+                button(session, "Активные", "catalog_active")
+                if scope == "finished"
+                else button(session, "Архивные", "catalog_archive")
+            ]
+        )
     rows += [
         [button(session, hack.display_name[:60], "open", hack.id)]
         for hack in hacks[page * 8 : (page + 1) * 8]
