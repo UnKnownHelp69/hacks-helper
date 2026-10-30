@@ -455,7 +455,7 @@ async def test_catalog_tabs_and_pagination_edit_same_panel_and_reset_page(app):
     await click(app, "Активные")
     names = [b.text for row in private_panel(app).reply_markup.inline_keyboard for b in row]
     assert "Catalog 0" in names and "Catalog 8" not in names
-    await click(app, "Мои активные")
+    await click(app, "Мои хакатоны")
     assert "У вас пока нет активных хакатонов" in private_panel(app).text
     assert private_panel(app).ephemeral_message_id == panel_id
 
