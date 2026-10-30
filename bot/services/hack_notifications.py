@@ -21,6 +21,7 @@ from bot.db.repositories import Storage
 from bot.services.formatting import link
 from bot.services.notify import Messenger
 from bot.services.reminders import chat_zone
+from bot.services.schedule_logic import current_phase
 from bot.services.timeutil import format_dt, tz_label
 from bot.services.users import UserDirectory
 
@@ -46,12 +47,24 @@ class HackNotifications:
     async def card(self, hack: Hackathon) -> tuple[str, InlineKeyboardMarkup]:
         tz = await chat_zone(self.storage, hack.chat_id, self.settings.default_timezone)
         members = await self.storage.hackathons.members(hack.id)
+        phase = current_phase(hack, utcnow()) if hack.is_active else "хакатон завершён"
+        phase_icon = {
+            "идёт регистрация": "🟢",
+            "регистрация закрыта, ждём старта": "⏳",
+            "хакатон идёт": "🚀",
+            "хакатон завершён": "🏁",
+        }[phase]
         lines = [
             f"🏆 <b>{escape(hack.display_name)}</b>",
-            f"Регистрация до: {format_dt(hack.registration_end, tz)}",
-            f"Начало: {format_dt(hack.start_at, tz)}",
-            f"Конец: {format_dt(hack.end_at, tz)} · {escape(tz_label(tz))}",
-            f"Команда: до {hack.team_max} · Участники: {len(members)}",
+            f"{phase_icon} <b>{phase[0].upper() + phase[1:]}</b>",
+            "",
+            f"📅 <b>Сроки</b> · {escape(tz_label(tz))}",
+            f"Регистрация до: <b>{format_dt(hack.registration_end, tz)}</b>",
+            f"Начало: <b>{format_dt(hack.start_at, tz)}</b>",
+            f"Конец: <b>{format_dt(hack.end_at, tz)}</b>",
+            "",
+            f"👥 <b>Команда</b> · до {hack.team_max} чел.",
+            f"Участники: {len(members)}",
         ]
         materials = []
         for url, label in (
@@ -63,12 +76,10 @@ class HackNotifications:
             if url:
                 materials.append(link(url, label))
         if materials:
-            lines.append(" · ".join(materials))
+            lines.extend(["", "🔗 " + " · ".join(materials)])
         checkpoints = await self.storage.workflow.checkpoints(hack.id)
         rows = []
         footer = [InlineKeyboardButton(text="Открыть", callback_data=f"hm:{hack.id}")]
-        if not hack.is_active or hack.end_at <= utcnow():
-            lines.append("🏁 Хакатон завершён")
         if checkpoints:
             footer.append(InlineKeyboardButton(text="📍 Чекпоинты", callback_data=f"hc:{hack.id}"))
         rows.append(footer)
