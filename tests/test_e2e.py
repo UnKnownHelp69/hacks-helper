@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import itertools
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from html import unescape
 from typing import Any
 
@@ -302,7 +302,7 @@ async def test_four_public_commands(app, chat_id):
     await send(app, "/me", chat_id=chat_id)
     assert f"id: {ADMIN_ID}" in await shown(app, ADMIN)
     await send(app, "/hack", chat_id=chat_id)
-    assert "Активных хакатонов нет" in await shown(app, ADMIN)
+    assert "У вас нет текущих хакатонов" in await shown(app, ADMIN)
     await send(app, "/github", chat_id=chat_id)
     assert "Аккаунт: не привязан" in app["session"].last_text()
     assert "Интеграция: настроена" in app["session"].last_text()
@@ -317,6 +317,7 @@ async def test_hack_list_and_card_are_chat_scoped(app, chat_id):
     await app["storage"].hackathons.archive(finished.id, finished.end_at)
     await app["storage"].hackathons.add_member(hack.id, ADMIN_ID)
     await send(app, "/hack", chat_id=chat_id)
+    await click(app, "Каталог", ADMIN, chat_id)
     message = app["session"].messages[-1]
     labels = [item.text for row in message.reply_markup.inline_keyboard for item in row]
     assert any("Хакатон <команды>" in label for label in labels)
@@ -387,14 +388,113 @@ async def test_old_hack_settings_buttons_redirect_without_changing_preference(ap
     assert await app["storage"].users.llm_preference(USER_ID) is None
 
 
-async def test_hack_menu_lists_cards_as_personal_buttons(app):
+async def test_hack_catalog_lists_cards_as_personal_buttons(app):
     for index in range(3):
         await create_hack(app, slug=f"hack{index}", title=f"hack{index}")
     await send(app, "/hack", ALICE)
+    await click(app, "Каталог")
     last = [m for m in app["session"].requests if isinstance(m, SendMessage)][-1]
     assert last.ephemeral_message_parameters.receiver_user_id == USER_ID
-    labels = [item.text for row in last.reply_markup.inline_keyboard for item in row]
+    labels = [item.text for row in private_panel(app).reply_markup.inline_keyboard for item in row]
     assert all(any(f"hack{index}" in label for label in labels) for index in range(3))
+
+
+async def test_personal_hack_menu_only_lists_registered_ongoing_events_for_each_user(app):
+    now = datetime.now(UTC)
+    storage = app["storage"]
+    mine = await storage.hackathons.create(
+        ALLOWED_CHAT,
+        "mine",
+        "Мой текущий",
+        now - timedelta(days=2),
+        now - timedelta(days=1),
+        now + timedelta(days=1),
+    )
+    other = await storage.hackathons.create(
+        ALLOWED_CHAT,
+        "other",
+        "Другой текущий",
+        now - timedelta(days=2),
+        now - timedelta(days=1),
+        now + timedelta(days=1),
+    )
+    upcoming = await create_hack(app, slug="future", title="Будущий")
+    await storage.hackathons.add_member(mine.id, USER_ID)
+    await storage.hackathons.add_member(other.id, 3003)
+    await storage.hackathons.add_member(upcoming.id, USER_ID)
+    bob = tg_user(3003, "bob")
+    for actor, expected, excluded in ((ALICE, mine, other), (bob, other, mine)):
+        await send(app, "/hack", actor)
+        panel = private_panel(app, actor)
+        names = [b.text for row in panel.reply_markup.inline_keyboard for b in row]
+        assert expected.title in names and excluded.title not in names
+        assert upcoming.title not in names
+        assert panel.receiver_user.id == actor.id
+        await click(app, "Каталог", actor)
+        names = [
+            b.text for row in private_panel(app, actor).reply_markup.inline_keyboard for b in row
+        ]
+        assert all(h.title in names for h in (mine, other, upcoming))
+    assert all(
+        not isinstance(r, SendMessage) or r.ephemeral_message_parameters
+        for r in app["session"].requests
+    )
+
+
+async def test_catalog_tabs_and_pagination_edit_same_panel_and_reset_page(app):
+    for index in range(10):
+        await create_hack(app, slug=f"cat{index}", title=f"Catalog {index}")
+    await send(app, "/hack", ALICE)
+    panel_id = private_panel(app).ephemeral_message_id
+    await click(app, "Каталог")
+    await click(app, "→")
+    names = [b.text for row in private_panel(app).reply_markup.inline_keyboard for b in row]
+    assert "Catalog 8" in names and "Catalog 0" not in names
+    await click(app, "Архивные")
+    assert "Архив пуст" in private_panel(app).text
+    await click(app, "Активные")
+    names = [b.text for row in private_panel(app).reply_markup.inline_keyboard for b in row]
+    assert "Catalog 0" in names and "Catalog 8" not in names
+    await click(app, "Мои активные")
+    assert "У вас нет текущих хакатонов" in private_panel(app).text
+    assert private_panel(app).ephemeral_message_id == panel_id
+
+
+async def test_ended_catalog_events_are_read_only_and_cannot_be_registered_even_before_archival(
+    app,
+):
+    now = datetime.now(UTC)
+    ended = await app["storage"].hackathons.create(
+        ALLOWED_CHAT,
+        "ended",
+        "Завершённый",
+        now - timedelta(days=3),
+        now - timedelta(days=2),
+        now - timedelta(days=1),
+    )
+    await create_hack(app, slug="future", title="Будущий")
+    await send(app, "/hack", ALICE)
+    await click(app, "Каталог")
+    assert not any(
+        b.text == "Завершённый"
+        for row in private_panel(app).reply_markup.inline_keyboard
+        for b in row
+    )
+    await click(app, "Архивные")
+    assert "Регистрация недоступна" in private_panel(app).text
+    await click(app, "Завершённый")
+    panel = private_panel(app)
+    assert "Хакатон завершён" in panel.text
+    buttons = [b.text for row in panel.reply_markup.inline_keyboard for b in row]
+    assert not any(
+        word in text
+        for text in buttons
+        for word in ("Участвую", "Редактировать", "Архивировать", "Разархивировать")
+    )
+    session = await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)
+    await press(app, f"hk:{session.token}:{session.revision}:vote:yes", ALICE, source=panel)
+    assert await app["storage"].hackathons.members(ended.id) == []
+    assert "Хакатон завершён" in private_panel(app).text
 
 
 async def test_expired_popup(app):
@@ -1556,7 +1656,7 @@ async def test_saved_tasks_are_visible_when_github_is_disconnected_and_scoped_to
 
 
 @pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
-async def test_github_account_can_be_linked_changed_and_unlinked_privately(app, chat_id):
+async def test_github_account_can_be_unlinked_then_relinked_privately(app, chat_id):
     app["ctx"].settings.allowed_chat_ids.add(chat_id)
     await send(app, "/me", ALICE, chat_id)
     await click(app, "Аккаунт GitHub", chat_id=chat_id)
@@ -1569,11 +1669,18 @@ async def test_github_account_can_be_linked_changed_and_unlinked_privately(app, 
         current.message_id == initial.message_id
         and current.ephemeral_message_id == initial.ephemeral_message_id
     )
-    await click(app, "Изменить аккаунт", chat_id=chat_id)
-    await click(app, "Отмена", chat_id=chat_id)
-    assert await app["storage"].github_links.get_login(USER_ID) == "alice-gh"
+    assert not any(
+        "Изменить аккаунт" in b.text for row in current.reply_markup.inline_keyboard for b in row
+    )
     await click(app, "Отвязать аккаунт", chat_id=chat_id)
     assert await app["storage"].github_links.get_login(USER_ID) is None
+    await click(app, "Привязать аккаунт", chat_id=chat_id)
+    await click(app, "Отмена", chat_id=chat_id)
+    assert await app["storage"].github_links.get_login(USER_ID) is None
+    await click(app, "Привязать аккаунт", chat_id=chat_id)
+    await answer_form(app, "new-alice", chat_id=chat_id)
+    assert await app["storage"].github_links.get_login(USER_ID) == "new-alice"
+    assert private_panel(app, chat_id=chat_id).ephemeral_message_id == initial.ephemeral_message_id
 
 
 async def test_public_github_profile_is_linked_privately_without_integration_token(app):
@@ -1601,20 +1708,32 @@ async def test_public_github_profile_is_linked_privately_without_integration_tok
         await github.close()
 
 
-async def test_github_link_duplicate_and_invalid_input_preserve_previous_account(app):
-    await app["storage"].github_links.set_login(USER_ID, "old-alice")
+async def test_github_link_duplicate_and_invalid_input_do_not_link_an_account(app):
     await app["storage"].github_links.set_login(3003, "bob-gh")
     await send(app, "/me", ALICE)
     await click(app, "Аккаунт GitHub")
-    await click(app, "Изменить аккаунт")
+    await click(app, "Привязать аккаунт")
     await answer_form(app, "https://github.com/bob-gh")
     assert "уже привязан" in private_panel(app).text
-    assert await app["storage"].github_links.get_login(USER_ID) == "old-alice"
+    assert await app["storage"].github_links.get_login(USER_ID) is None
     await answer_form(app, "https://evil.example/alice")
-    assert await app["storage"].github_links.get_login(USER_ID) == "old-alice"
+    assert await app["storage"].github_links.get_login(USER_ID) is None
     await send(app, "/me", ALICE)
     assert await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is not None
     assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
+
+
+async def test_legacy_link_button_does_not_replace_an_already_linked_account(app):
+    await app["storage"].github_links.set_login(USER_ID, "old-alice")
+    await send(app, "/me", ALICE)
+    await click(app, "Аккаунт GitHub")
+    session = await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)
+    await press(
+        app, f"me:{session.token}:{session.revision}:gh_link:", ALICE, source=private_panel(app)
+    )
+    assert await app["storage"].github_links.get_login(USER_ID) == "old-alice"
+    assert "Пришлите свой GitHub-логин" not in private_panel(app).text
+    assert (await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)).step == "github"
 
 
 async def test_issue_and_participant_lists_are_paginated_and_assign_correct_issue(app, monkeypatch):
@@ -1920,6 +2039,7 @@ async def test_open_new_shared_hack_overlays_clicked_card_without_editing_previo
 async def test_callback_edits_its_own_personal_message_instead_of_latest_command_panel(app):
     hack = await create_hack(app)
     await send(app, "/hack", ALICE)
+    await click(app, "Каталог")
     clicked = private_panel(app)
     data = next(
         b.callback_data
@@ -1945,6 +2065,7 @@ async def test_callback_edits_its_own_personal_message_instead_of_latest_command
 async def test_missing_clicked_personal_panel_is_replaced_without_changing_another_panel(app):
     hack = await create_hack(app)
     await send(app, "/hack", ALICE)
+    await click(app, "Каталог")
     clicked = private_panel(app)
     data = next(
         b.callback_data

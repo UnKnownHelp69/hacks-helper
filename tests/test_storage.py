@@ -143,6 +143,36 @@ async def test_archive_keeps_closed_tasks_and_history(storage):
     assert counts == {1: (1, 1), 2: (1, 1)}
 
 
+async def test_personal_ongoing_list_filters_user_chat_status_and_date_boundaries(
+    storage, monkeypatch
+):
+    monkeypatch.setattr("bot.db.repositories.utcnow", lambda: START)
+
+    async def create(slug, start, end, *, chat=ALLOWED_CHAT, member=1):
+        hack = await storage.hackathons.create(chat, slug, slug, start, start, end)
+        await storage.hackathons.add_member(hack.id, member)
+        return hack
+
+    mine = await create("mine", START, START + timedelta(days=1))
+    other = await create("other", START, START + timedelta(days=1), member=2)
+    await create("upcoming", START + timedelta(seconds=1), START + timedelta(days=2))
+    await create("ended", START - timedelta(days=1), START)
+    foreign = await create("foreign", START, START + timedelta(days=1), chat=ALLOWED_CHAT - 1)
+    archived = await create("archived", START, START + timedelta(days=1))
+    await storage.hackathons.archive(archived.id, START)
+    assert [h.id for h in await storage.hackathons.list_ongoing_for_user(ALLOWED_CHAT, 1)] == [
+        mine.id
+    ]
+    assert [h.id for h in await storage.hackathons.list_ongoing_for_user(ALLOWED_CHAT, 2)] == [
+        other.id
+    ]
+    assert [h.id for h in await storage.hackathons.list_ongoing_for_user(ALLOWED_CHAT - 1, 1)] == [
+        foreign.id
+    ]
+    await storage.workflow.vote(mine.id, 1, "no")
+    assert await storage.hackathons.list_ongoing_for_user(ALLOWED_CHAT, 1) == []
+
+
 async def test_reopened_task_is_reactivated(storage):
     hack = await storage.hackathons.create(
         ALLOWED_CHAT, "h1", None, START, START, START + timedelta(days=1)

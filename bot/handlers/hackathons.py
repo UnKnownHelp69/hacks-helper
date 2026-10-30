@@ -15,7 +15,7 @@ from aiogram.types import (
 
 from bot.context import AppContext
 from bot.db.database import utcnow
-from bot.db.models import HACK_ACTIVE, HACK_FINISHED, HackSession, Team
+from bot.db.models import HackSession, Team
 from bot.errors import UserError
 from bot.handlers.base import usage
 from bot.handlers.import_progress import ImportProgress
@@ -50,12 +50,28 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
         await ctx.storage.workflow.clear_forms(event.from_user.id, message.chat.id)
         await ctx.hacks.require_access(message.chat.id, event.from_user.id)
         session = await ctx.storage.workflow.new_session(event.from_user.id, message.chat.id)
-    archived = session.data.get("archive", False)
-    hacks = await ctx.storage.hackathons.list(
-        session.chat_id, HACK_FINISHED if archived else HACK_ACTIVE
-    )
+    scope = session.data.get("list", "finished" if session.data.get("archive") else "mine")
+    if scope == "mine":
+        hacks = await ctx.storage.hackathons.list_ongoing_for_user(session.chat_id, session.user_id)
+    else:
+        now = utcnow()
+        hacks = [
+            hack
+            for hack in await ctx.storage.hackathons.list(session.chat_id)
+            if (hack.end_at <= now if scope == "finished" else hack.is_active and hack.end_at > now)
+        ]
     page = min(max(int(session.data.get("page", 0)), 0), max(0, (len(hacks) - 1) // 8))
-    rows = [
+    rows = (
+        []
+        if scope == "mine"
+        else [
+            [
+                button(session, "Активные", "catalog_active"),
+                button(session, "Архивные", "catalog_archive"),
+            ]
+        ]
+    )
+    rows += [
         [button(session, hack.display_name[:60], "open", hack.id)]
         for hack in hacks[page * 8 : (page + 1) * 8]
     ]
@@ -66,20 +82,29 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
         pages.append(button(session, "→", "page", page + 1))
     if pages:
         rows.append(pages)
-    rows.extend(
-        [
-            [button(session, "➕ Создать вручную", "manual")],
-            [button(session, "Активные" if archived else "Архив", "archive")],
-        ]
-    )
-    title = "Архив хакатонов" if archived else "Хакатоны"
-    text = f"🏆 <b>{title}</b>\n" + (
-        "Выберите хакатон или создайте новый."
-        if hacks
-        else "Активных хакатонов нет"
-        if not archived
-        else "Архив пуст"
-    )
+    if scope == "mine":
+        rows.extend(
+            [
+                [button(session, "📚 Каталог хакатонов", "catalog_active")],
+                [button(session, "➕ Создать вручную", "manual")],
+            ]
+        )
+    else:
+        rows.append([button(session, "Мои активные", "menu")])
+    title = {
+        "mine": "Хакатоны · Мои активные",
+        "active": "Каталог · Активные хакатоны",
+        "finished": "Каталог · Архивные хакатоны",
+    }[scope]
+    if scope == "mine":
+        description = "Текущие хакатоны, на которые вы зарегистрированы."
+        if not hacks:
+            description += "\nУ вас нет текущих хакатонов. Зарегистрироваться можно в каталоге."
+    elif scope == "finished":
+        description = "Хакатоны завершились. Регистрация недоступна." if hacks else "Архив пуст."
+    else:
+        description = "Выберите хакатон для просмотра и регистрации." if hacks else "Каталог пуст."
+    text = f"🏆 <b>{title}</b>\n{description}"
     await personal_reply(event, text, reply_markup=keyboard(rows))
 
 
@@ -384,10 +409,17 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
             await menu(callback, ctx)
         elif action in {"llm", "llm_provider", "llm_page", "llm_pick", "llm_reset"}:
             await personal_reply(callback, "Личные настройки перенесены в /me")
-        elif action in {"page", "archive"}:
+        elif action in {"page", "archive", "catalog_active", "catalog_archive"}:
             session.data["page"] = int(argument) if action == "page" else 0
-            if action == "archive":
-                session.data["archive"] = not session.data.get("archive", False)
+            if action != "page":
+                if action == "archive":
+                    previous = session.data.get(
+                        "list", "finished" if session.data.get("archive") else "mine"
+                    )
+                    scope = "active" if previous == "finished" else "finished"
+                else:
+                    scope = "active" if action == "catalog_active" else "finished"
+                session.data = {"list": scope, "page": 0}
             await ctx.storage.workflow.save_session(session)
             await menu(callback, ctx, session)
         elif action in {"manual", "import"}:

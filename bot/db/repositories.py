@@ -292,6 +292,17 @@ class HackathonsRepo:
         )
         return [_hackathon(r) for r in rows]
 
+    async def list_ongoing_for_user(self, chat_id: int, user_id: int) -> list[Hackathon]:
+        now = to_db(utcnow())
+        rows = await self.db.fetchall(
+            "SELECT h.* FROM hackathons h "
+            "JOIN hackathon_members m ON m.hackathon_id=h.id "
+            "WHERE h.chat_id=? AND m.user_id=? AND h.status=? "
+            "AND h.start_at<=? AND h.end_at>? ORDER BY h.start_at,h.id",
+            (chat_id, user_id, HACK_ACTIVE, now, now),
+        )
+        return [_hackathon(row) for row in rows]
+
     async def update_dates(
         self, hack_id: int, registration_end: datetime, start_at: datetime, end_at: datetime
     ) -> None:

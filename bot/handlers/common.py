@@ -91,9 +91,10 @@ async def github_account(event: Event, ctx: AppContext, session: HackSession) ->
     login = await ctx.storage.github_links.get_login(session.user_id)
     account = link(f"https://github.com/{login}", login) if login else "не привязан"
     rows = [[button(session, "К профилю", "profile")]]
-    rows.append([button(session, "Изменить аккаунт" if login else "Привязать аккаунт", "gh_link")])
     if login:
         rows.append([button(session, "Отвязать аккаунт", "gh_unlink")])
+    else:
+        rows.append([button(session, "Привязать аккаунт", "gh_link")])
     await personal_reply(
         event,
         f"🐙 <b>Аккаунт GitHub</b>\n{account}\n"
@@ -198,7 +199,10 @@ async def callback_me(callback: CallbackQuery, ctx: AppContext) -> None:
         elif action == "github":
             await github_account(callback, ctx, session)
         elif action == "gh_link":
-            await github_prompt(callback, ctx, session)
+            if await ctx.storage.github_links.get_login(session.user_id):
+                await github_account(callback, ctx, session)
+            else:
+                await github_prompt(callback, ctx, session)
         elif action == "gh_unlink":
             await ctx.storage.github_links.remove(session.user_id)
             await github_account(callback, ctx, session)
@@ -256,6 +260,9 @@ async def github_input(message: Message, ctx: AppContext, github_session: HackSe
             return
     raw = (message.text or message.caption or "").strip()
     if raw.lower() in {"отмена", "cancel"}:
+        await github_account(message, ctx, session)
+        return
+    if await ctx.storage.github_links.get_login(session.user_id):
         await github_account(message, ctx, session)
         return
     try:

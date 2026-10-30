@@ -15,6 +15,7 @@ from aiogram.types import (
 )
 
 from bot.config import Settings
+from bot.db.database import utcnow
 from bot.db.models import Hackathon
 from bot.db.repositories import Storage
 from bot.services.formatting import link
@@ -66,7 +67,7 @@ class HackNotifications:
         checkpoints = await self.storage.workflow.checkpoints(hack.id)
         rows = []
         footer = [InlineKeyboardButton(text="Открыть", callback_data=f"hm:{hack.id}")]
-        if not hack.is_active:
+        if not hack.is_active or hack.end_at <= utcnow():
             lines.append("🏁 Хакатон завершён")
         if checkpoints:
             footer.append(InlineKeyboardButton(text="📍 Чекпоинты", callback_data=f"hc:{hack.id}"))
