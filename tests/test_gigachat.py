@@ -95,7 +95,10 @@ async def test_function_extraction_and_provider_credentials_stay_separate():
                         "message": {
                             "function_call": {
                                 "name": "extract_hackathon",
-                                "arguments": fields(start_at="2026-11-05T10:00:00+03:00"),
+                                "arguments": fields(
+                                    start_at="2026-11-05T10:00:00+03:00",
+                                    org_chat_url="t.me/ligactf",
+                                ),
                             }
                         },
                     }
@@ -127,6 +130,7 @@ async def test_function_extraction_and_provider_credentials_stay_separate():
             previous_pages=[{"text": "rules"}],
         )
         assert result["start_at"] == "2026-11-05T07:00:00+00:00"
+        assert result["org_chat_url"] == "https://t.me/ligactf"
         await llm.extract("post", "", None, TZ)
         assert llm.default_selection == ("openrouter", "test/model")
         assert len(calls) == 3

@@ -48,6 +48,20 @@ def client(handler, key="test-secret", *, mandatory=False):
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "url", "expected"),
+    [
+        ("org_chat_url", "t.me/ligactf", "https://t.me/ligactf"),
+        ("org_chat_url", "telegram.me/ligactf", "https://telegram.me/ligactf"),
+        ("org_chat_url", "t.me/registration_bot?start=null", None),
+        ("site_url", "лигацтф.рус", "https://лигацтф.рус/"),
+        ("spec_url", "event.example/rules.pdf", "https://event.example/rules.pdf"),
+    ],
+)
+def test_bare_domains_are_normalized_before_url_and_organizer_validation(field, url, expected):
+    assert getattr(Extraction.model_validate(fields(**{field: url})), field) == expected
+
+
 async def test_structured_request_and_normalized_dates():
     def handler(request):
         assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
@@ -99,6 +113,11 @@ async def test_structured_request_and_normalized_dates():
         response(fields(start_at="2026-11-05T10:00:00")),
         response(fields(start_at="0001-01-01T00:00:00+14:00")),
         response(fields(org_chat_url="http://127.0.0.1/")),
+        response(fields(org_chat_url="localhost/ligactf")),
+        response(fields(org_chat_url="t.me@127.0.0.1/ligactf")),
+        response(fields(site_url="127.0.0.1/private")),
+        response(fields(spec_url="event.internal/rules")),
+        response(fields(site_url="javascript:alert(1)")),
         response(fields(editing_id=7)),
         response(fields(checkpoints=[{"title": "x", "at": "bad date"}])),
         response(finish_reason="length"),

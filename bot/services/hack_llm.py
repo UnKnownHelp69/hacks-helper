@@ -68,6 +68,9 @@ class Extraction(BaseModel):
     def url(cls, value: str | None) -> str | None:
         if value is None:
             return None
+        # OCR and models often preserve a domain as printed, without its scheme.
+        if not urlsplit(value).scheme and not value.startswith("/"):
+            value = "https://" + value
         try:
             return public_url(value)
         except UserError as exc:
