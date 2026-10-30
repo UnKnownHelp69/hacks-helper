@@ -216,6 +216,33 @@ async def test_direct_rules_link_does_not_need_a_landing_page(service, import_pa
     fetch.assert_awaited_once_with(RULES)
 
 
+async def test_automatic_ctf_import_reads_regulations_and_keeps_unknown_dates_empty(
+    service, storage, import_pages, monkeypatch
+):
+    pages, fetch = import_pages
+    root = "https://лигацтф.рус/"
+    pdf = "https://лк.лигацтф.рус/storage/docs/regulation.pdf"
+    pages[root] = (
+        '<h1>Лига ЦТФ</h1><p>Начало 05.11.2099</p><p>Команды от 80 до 90 человек</p>'
+        f'<a href="{pdf}">Положение о Лиге</a>'
+    )
+    pages[pdf] = "<pre>Положение о Лиге ЦТФ. Общие положения. Команда от 2 до 8 человек</pre>"
+    service.llm.configured = True
+    extract = AsyncMock(return_value={"is_hackathon": True, "title": "Лига ЦТФ"})
+    monkeypatch.setattr(service.llm, "extract", extract)
+    data = await service.extract_import(ALLOWED_CHAT, USER_ID, root)
+    assert data["title"] == "Лига ЦТФ" and data["team_max"] == 8
+    assert data["import_sources"] == [pdf]
+    assert not any(data.get(field) for field in ("start_at", "end_at", "registration_end"))
+    extract.assert_awaited_once()
+    assert "2099" not in str(extract.await_args)
+    assert [call.args[0] for call in fetch.await_args_list] == [root, pdf]
+    with pytest.raises(UserError, match="Хакатон не создан"):
+        await service.import_post(ALLOWED_CHAT, USER_ID, root)
+    assert await storage.hackathons.list(ALLOWED_CHAT) == []
+    assert await storage.workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is None
+
+
 async def test_llm_failure_preserves_document_parser_facts(service, import_pages, monkeypatch):
     pages, _ = import_pages
     pages[RULES] += "<p>Начало 05.11.2026 10:00</p>"

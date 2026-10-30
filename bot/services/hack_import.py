@@ -7,8 +7,10 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import socket
 import sys
+import tempfile
 from contextlib import suppress
 from datetime import UTC, datetime
 from html import escape
@@ -22,11 +24,11 @@ from aiohttp.abc import AbstractResolver
 from aiohttp.resolver import ThreadedResolver
 
 from bot.errors import UserError
+from bot.services.pdf_text import MAX_PDF_BYTES, OCR_UNAVAILABLE, PDF_TIMEOUT_SECONDS
 
 URL_RE = re.compile(r"https?://[^\s<>\"\[\]]+", re.IGNORECASE)
-HACK_RE = re.compile(r"хакатон|hackathon", re.IGNORECASE)
+HACK_RE = re.compile(r"хакатон|hackathon|\b(?:ctf|цтф|capture\s+the\s+flag)\b", re.IGNORECASE)
 MAX_HTML_BYTES = 2_000_000
-MAX_PDF_BYTES = 1_000_000
 RULES_LINK_RE = re.compile(r"положени|регламент|правила|regulation|rules|polozhen|reglament", re.I)
 UNRELATED_DOC_RE = re.compile(
     r"политик|персональн|согласи|конфиденц|privacy|consent|personal.?data", re.I
@@ -121,7 +123,7 @@ class PublicResolver(AbstractResolver):
 
 
 async def fetch_public_page(url: str) -> tuple[str, str]:
-    """Bound HTML to 2 MB and PDF to 1 MB; validate every redirect and destination."""
+    """Bound HTML and PDF to 2 MB; validate every redirect and destination."""
     current = public_url(url)
     resolver = PublicResolver()
     try:
@@ -141,7 +143,7 @@ async def fetch_public_page(url: str) -> tuple[str, str]:
                     if response.status in {301, 302, 303, 307, 308}:
                         location = response.headers.get("Location")
                         if not location:
-                            break
+                            raise UserError("Сайт вернул перенаправление без адреса")
                         current = public_url(urljoin(current, location))
                         continue
                     if response.status != 200:
@@ -165,37 +167,57 @@ async def fetch_public_page(url: str) -> tuple[str, str]:
                         if len(data) > limit:
                             raise UserError("Страница слишком большая; заполните данные вручную")
                     if response.content_type == "application/pdf":
-                        return "<pre>" + escape(await pdf_text(bytes(data))) + "</pre>", current
+                        break
                     return data.decode(response.charset or "utf-8", errors="replace"), current
+            else:
+                raise UserError("Слишком много перенаправлений; заполните данные вручную")
+        # OCR has its own deadline; the network timeout must not interrupt local parsing.
+        return "<pre>" + escape(await pdf_text(bytes(data))) + "</pre>", current
     except (aiohttp.ClientError, OSError, TimeoutError, LookupError):
         raise UserError("Не удалось прочитать сайт. Можно заполнить данные вручную") from None
     finally:
         await resolver.close()
-    raise UserError("Слишком много перенаправлений; заполните данные вручную")
 
 
 async def pdf_text(data: bytes) -> str:
     """Keep untrusted PDF parsing outside the bot process, with a hard deadline."""
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "bot.services.pdf_text",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        env={key: value for key, value in os.environ.items() if key in {"SYSTEMROOT", "WINDIR"}},
-    )
-    try:
-        output, _ = await asyncio.wait_for(process.communicate(data), timeout=6)
-        if process.returncode or not output.strip():
-            raise UserError("Не удалось извлечь текст PDF; возможно, это скан")
-        return output.decode("utf-8")
-    except TimeoutError:
-        raise UserError("PDF слишком сложный для автоматического чтения") from None
-    finally:
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
+    with tempfile.TemporaryDirectory(prefix="hacks-helper-pdf-") as workdir:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "bot.services.pdf_text",
+            workdir,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=os.name == "posix",
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if key in {"SYSTEMROOT", "WINDIR", "PATH", "TESSDATA_PREFIX"} and value
+            },
+        )
+        try:
+            output, _ = await asyncio.wait_for(
+                process.communicate(data), timeout=PDF_TIMEOUT_SECONDS
+            )
+            if process.returncode == OCR_UNAVAILABLE:
+                raise UserError(
+                    "Положение — PDF-скан. Для чтения нужны Linux/macOS, Poppler и Tesseract "
+                    "с языками rus и eng на сервере бота"
+                )
+            if process.returncode or not output.strip():
+                raise UserError("Не удалось извлечь текст PDF")
+            return output.decode("utf-8")
+        except TimeoutError:
+            raise UserError("PDF слишком сложный для автоматического чтения") from None
+        finally:
+            if os.name == "posix":
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            elif process.returncode is None:
+                process.kill()
+            await process.wait()
 
 
 class PageParser(HTMLParser):

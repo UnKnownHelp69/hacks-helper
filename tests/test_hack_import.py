@@ -5,6 +5,7 @@ import pytest
 from bot.errors import UserError
 from bot.services.hack_import import (
     MAX_HTML_BYTES,
+    MAX_PDF_BYTES,
     PublicResolver,
     extract_page,
     extract_post,
@@ -56,6 +57,21 @@ def test_missing_post_data_stays_empty():
     assert "start_at" not in result and "team_min" not in result
     result = extract_post("Хакатон\nНачало 5 ноября 2026 в 10:00", MSK)
     assert result["start_at"] == "2026-11-05T07:00:00+00:00"
+
+
+@pytest.mark.parametrize("title", ["Лига ЦТФ", "CTF competition", "Capture the Flag"])
+def test_ctf_events_and_their_regulations_are_recognized(title):
+    html = f"<pre>Положение о проведении {title}. Общие положения</pre>"
+    assert is_regulation(html, "https://event.example/regulation.pdf")
+    assert extract_page(html, "https://event.example/regulation.pdf", MSK)["is_hackathon"]
+    assert extract_post(title, MSK)["title"] == title
+
+
+@pytest.mark.parametrize("text", ["CTFoundation", "nonctf", "ЦТФонд"])
+def test_ctf_word_fragments_do_not_recognize_unrelated_documents(text):
+    html = f"<pre>Положение о проведении {text}. Общие положения</pre>"
+    assert not is_regulation(html, "https://event.example/regulation.pdf")
+    assert not extract_page(html, "https://event.example/regulation.pdf", MSK)["is_hackathon"]
 
 
 def test_russian_date_range_and_invalid_deep_metadata():
@@ -130,12 +146,14 @@ async def test_dns_rebinding_and_mixed_private_records_are_rejected(monkeypatch)
         await resolver.close()
 
 
-@pytest.mark.parametrize("mode", ["private_redirect", "oversized", "non_html", "pdf"])
+@pytest.mark.parametrize(
+    "mode", ["private_redirect", "missing_location", "oversized", "non_html", "pdf"]
+)
 async def test_fetch_rejects_unsafe_redirects_and_unbounded_or_non_page_content(monkeypatch, mode):
     requests = []
 
     class Response:
-        status = 302 if mode == "private_redirect" else 200
+        status = 302 if mode in {"private_redirect", "missing_location"} else 200
         headers = {"Location": "http://127.0.0.1/secret"} if mode == "private_redirect" else {}
         content_type = (
             "image/png"
@@ -189,7 +207,8 @@ async def test_fetch_rejects_unsafe_redirects_and_unbounded_or_non_page_content(
 
 
 @pytest.mark.parametrize("pdf", [False, True])
-async def test_tilda_sized_html_is_read_but_pdf_limit_stays_one_mb(monkeypatch, pdf):
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_large_html_and_pdf_are_read_with_bounded_size(monkeypatch, pdf, oversized):
     from unittest.mock import AsyncMock
 
     # GlobalHack serves 1.08 MB of Tilda markup for a few thousand visible characters.
@@ -199,6 +218,8 @@ async def test_tilda_sized_html_is_read_but_pdf_limit_stays_one_mb(monkeypatch, 
         + b"</style>"
         + "<h1>Хакатон</h1><p>13 — 16 ноября 2026</p>".encode()
     )
+    if oversized:
+        page = b" " * ((MAX_PDF_BYTES if pdf else MAX_HTML_BYTES) + 1)
 
     class Response:
         status = 200
@@ -233,17 +254,22 @@ async def test_tilda_sized_html_is_read_but_pdf_limit_stays_one_mb(monkeypatch, 
             return Response()
 
     monkeypatch.setattr("bot.services.hack_import.aiohttp.ClientSession", Session)
-    parse_pdf = AsyncMock()
+    parse_pdf = AsyncMock(return_value="Лига ЦТФ")
     monkeypatch.setattr("bot.services.hack_import.pdf_text", parse_pdf)
-    if pdf:
+    if oversized:
         with pytest.raises(UserError, match="слишком большая"):
             await fetch_public_page("https://hack.example/")
+    elif pdf:
+        html, _ = await fetch_public_page("https://hack.example/")
+        assert html == "<pre>Лига ЦТФ</pre>"
+        parse_pdf.assert_awaited_once_with(page)
     else:
         html, url = await fetch_public_page("https://hack.example/")
         data = extract_page(html, url, MSK)
         assert data["start_at"] == "2026-11-12T21:00:00+00:00"
         assert data["end_at"] == "2026-11-16T20:59:00+00:00"
-    parse_pdf.assert_not_awaited()
+    if oversized or not pdf:
+        parse_pdf.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
