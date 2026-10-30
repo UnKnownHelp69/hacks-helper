@@ -136,11 +136,11 @@ async def personal_reply(
     async with panel.lock:
         panel.revision += 1
         if edit and len(chunks) == 1 and not isinstance(reply_markup, ForceReply):
-            target = _panel_message(event, panel)
-            if target is None and isinstance(event, CallbackQuery):
+            if isinstance(event, CallbackQuery):
                 message = event.message
-                if message.ephemeral_message_id is not None:
-                    target = message
+                target = message if message.ephemeral_message_id is not None else None
+            else:
+                target = _panel_message(event, panel)
             if target is not None:
                 try:
                     await edit_personal_reply(event, target, text, reply_markup=reply_markup)

@@ -68,10 +68,7 @@ async def menu(event: Event, ctx: AppContext, session: HackSession | None = None
         rows.append(pages)
     rows.extend(
         [
-            [
-                button(session, "➕ Создать вручную", "manual"),
-                button(session, "🔗 Из поста / ссылки", "import"),
-            ],
+            [button(session, "➕ Создать вручную", "manual")],
             [button(session, "Активные" if archived else "Архив", "archive")],
         ]
     )

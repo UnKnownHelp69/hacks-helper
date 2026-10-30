@@ -721,7 +721,12 @@ async def test_votes_team_choices_and_duplicate_new_team_click(app):
         for method in app["session"].requests
         if isinstance(method, SendMessage) and method.ephemeral_message_parameters
     ]
-    assert len(personal) == len(actors)
+    assert len(personal) == 2 * len(actors)
+    assert all(
+        len([r for r in personal if r.ephemeral_message_parameters.receiver_user_id == actor.id])
+        == 2
+        for actor in actors
+    )
 
 
 async def test_failed_import_has_no_saved_form_and_legacy_publish_is_disabled(app):
@@ -1066,7 +1071,9 @@ async def test_compact_cards_hide_checkpoint_details_and_open_them_privately_in_
     checkpoint_button = next(item for item in shared_buttons if "Чекпоинты" in item.text)
     await press(app, checkpoint_button.callback_data, ALICE, chat_id, source=shared)
     details = private_panel(app, chat_id=chat_id)
-    assert (details.ephemeral_message_id if chat_id < 0 else details.message_id) == panel_id
+    assert details.ephemeral_message_id != panel_id
+    assert app["session"].addresses[(chat_id, True, panel_id)].text == initial.text
+    panel_id = details.ephemeral_message_id
     if chat_id < 0:
         assert details.receiver_user.id == USER_ID
     assert "Промежуточная защита" in details.text and "Финальное демо" in details.text
@@ -1090,7 +1097,8 @@ async def test_compact_cards_hide_checkpoint_details_and_open_them_privately_in_
         for method in app["session"].requests
         if isinstance(method, SendMessage) and (chat_id > 0 or method.ephemeral_message_parameters)
     ]
-    assert len(personal) == 1
+    assert len(personal) == 2
+    assert personal[-1].ephemeral_message_parameters.replace_callback_query_message
 
 
 async def test_empty_checkpoint_list_does_not_add_buttons_to_cards(app):
@@ -1130,9 +1138,12 @@ async def test_cancel_creation_works_on_current_prompt_without_leaving_the_panel
     )
 
 
-async def test_cancel_import_prompt_returns_to_menu_without_starting_import(app):
+async def test_removed_import_button_still_allows_cancelling_a_legacy_prompt(app):
     await send(app, "/hack", ALICE)
-    await click(app, "Из поста / ссылки")
+    panel = private_panel(app)
+    assert not any("Из поста" in b.text for row in panel.reply_markup.inline_keyboard for b in row)
+    session = await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)
+    await press(app, f"hk:{session.token}:{session.revision}:import:", ALICE, source=panel)
     await click(app, "Отмена")
     assert "Хакатоны" in private_panel(app).text
     assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
@@ -1781,3 +1792,88 @@ async def test_repeated_same_command_and_mention_without_entities_always_send_ne
     sends = [r for r in app["session"].requests if isinstance(r, SendMessage)]
     assert len(sends) == 3
     assert all(r.ephemeral_message_parameters.receiver_user_id == USER_ID for r in sends)
+
+
+async def test_open_new_shared_hack_overlays_clicked_card_without_editing_previous_personal_panel(
+    app,
+):
+    from tests.test_hack_workflow import draft
+
+    await send(app, "/me", ALICE)
+    previous = private_panel(app)
+    session, fields = await draft(app["storage"])
+    hack_id = await app["storage"].workflow.save_hack(session, fields)
+    await app["ctx"].hack_notifications.flush()
+    shared = next(
+        m for m in reversed(app["session"].messages) if not m.receiver_user and m.reply_markup
+    )
+    before = len(app["session"].requests)
+    await press(app, f"hm:{hack_id}", ALICE, source=shared)
+    requests = app["session"].requests[before:]
+    messages = [r for r in requests if isinstance(r, SendMessage)]
+    assert len(messages) == 1
+    assert messages[0].ephemeral_message_parameters.receiver_user_id == USER_ID
+    assert messages[0].ephemeral_message_parameters.replace_callback_query_message
+    assert not any(isinstance(r, (EditMessageText, EditEphemeralMessageText)) for r in requests)
+    assert (
+        app["session"].addresses[(ALLOWED_CHAT, True, previous.ephemeral_message_id)].text
+        == previous.text
+    )
+    assert app["session"].addresses[(ALLOWED_CHAT, False, shared.message_id)].text == shared.text
+    opened = private_panel(app)
+    await click(app, "Команды")
+    assert private_panel(app).ephemeral_message_id == opened.ephemeral_message_id
+    assert len([r for r in app["session"].requests[before:] if isinstance(r, SendMessage)]) == 1
+
+
+async def test_callback_edits_its_own_personal_message_instead_of_latest_command_panel(app):
+    hack = await create_hack(app)
+    await send(app, "/hack", ALICE)
+    clicked = private_panel(app)
+    data = next(
+        b.callback_data
+        for row in clicked.reply_markup.inline_keyboard
+        for b in row
+        if b.text == hack.display_name
+    )
+    await send(app, "/me", ALICE)
+    other = private_panel(app)
+    requests = await press(app, data, ALICE, source=clicked)
+    edits = [r for r in requests if isinstance(r, EditEphemeralMessageText)]
+    assert len(edits) == 1 and edits[0].ephemeral_message_id == clicked.ephemeral_message_id
+    assert edits[0].receiver_user_id == USER_ID
+    assert not any(isinstance(r, (SendMessage, EditMessageText)) for r in requests)
+    assert (
+        app["session"].addresses[(ALLOWED_CHAT, True, other.ephemeral_message_id)].text
+        == other.text
+    )
+    await click(app, "Команды")
+    assert private_panel(app).ephemeral_message_id == clicked.ephemeral_message_id
+
+
+async def test_missing_clicked_personal_panel_is_replaced_without_changing_another_panel(app):
+    hack = await create_hack(app)
+    await send(app, "/hack", ALICE)
+    clicked = private_panel(app)
+    data = next(
+        b.callback_data
+        for row in clicked.reply_markup.inline_keyboard
+        for b in row
+        if b.text == hack.display_name
+    )
+    await send(app, "/me", ALICE)
+    other = private_panel(app)
+    del app["session"].addresses[(ALLOWED_CHAT, True, clicked.ephemeral_message_id)]
+    requests = await press(app, data, ALICE, source=clicked)
+    messages = [r for r in requests if isinstance(r, SendMessage)]
+    assert len(messages) == 1
+    assert messages[0].ephemeral_message_parameters.receiver_user_id == USER_ID
+    assert not messages[0].ephemeral_message_parameters.replace_callback_query_message
+    assert (
+        app["session"].addresses[(ALLOWED_CHAT, True, other.ephemeral_message_id)].text
+        == other.text
+    )
+    assert private_panel(app).ephemeral_message_id not in {
+        clicked.ephemeral_message_id,
+        other.ephemeral_message_id,
+    }
