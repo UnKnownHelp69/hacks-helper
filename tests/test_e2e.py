@@ -890,7 +890,9 @@ async def test_expired_progress_panel_is_replaced_only_with_private_failure(app,
 
 
 @pytest.mark.parametrize("chat_id", [ALLOWED_CHAT])
-async def test_commands_manual_form_and_result_reuse_one_personal_message(app, chat_id):
+async def test_commands_create_new_panels_while_manual_form_and_result_reuse_current_panel(
+    app, chat_id
+):
     app["ctx"].settings.allowed_chat_ids.add(chat_id)
     await send(app, "/hack", ALICE, chat_id)
     initial = private_panel(app, ALICE, chat_id)
@@ -905,16 +907,22 @@ async def test_commands_manual_form_and_result_reuse_one_personal_message(app, c
     ):
         await answer_form(app, value, chat_id=chat_id)
     assert len(await app["storage"].hackathons.list(chat_id)) == 1
+    assert private_panel(app, ALICE, chat_id).ephemeral_message_id == initial_id
     await send(app, "/me", ALICE, chat_id)
+    profile_id = private_panel(app, ALICE, chat_id).ephemeral_message_id
+    assert profile_id != initial_id
     await send(app, "/hack", ALICE, chat_id)
     current = private_panel(app, ALICE, chat_id)
-    assert (current.ephemeral_message_id if chat_id < 0 else current.message_id) == initial_id
+    assert (current.ephemeral_message_id if chat_id < 0 else current.message_id) not in {
+        initial_id,
+        profile_id,
+    }
     personal = [
         method
         for method in app["session"].requests
         if isinstance(method, SendMessage) and (chat_id > 0 or method.ephemeral_message_parameters)
     ]
-    assert len(personal) == 1
+    assert len(personal) == 3
     assert all(
         "черновик" not in item.text.lower()
         for row in current.reply_markup.inline_keyboard
@@ -922,7 +930,7 @@ async def test_commands_manual_form_and_result_reuse_one_personal_message(app, c
     )
 
 
-async def test_personal_panels_are_isolated_by_user_and_concurrent_first_replies_are_serialized(
+async def test_personal_panels_are_isolated_by_user_and_concurrent_commands_each_send_a_reply(
     app, monkeypatch
 ):
     import asyncio
@@ -937,14 +945,14 @@ async def test_personal_panels_are_isolated_by_user_and_concurrent_first_replies
     monkeypatch.setattr(app["session"], "make_request", delayed)
     await asyncio.gather(send(app, "/help", ALICE), send(app, "/me", ALICE))
     sends = [method for method in app["session"].requests if isinstance(method, SendMessage)]
-    assert len(sends) == 1
+    assert len(sends) == 2
     alice_panel = private_panel(app)
     bob = tg_user(3003, "bob_user", "Bob")
     await send(app, "/me", bob)
     bob_panel = private_panel(app, bob)
     assert alice_panel.ephemeral_message_id != bob_panel.ephemeral_message_id
     await send(app, "/hack", ALICE)
-    assert private_panel(app).ephemeral_message_id == alice_panel.ephemeral_message_id
+    assert private_panel(app).ephemeral_message_id != alice_panel.ephemeral_message_id
     bob_address = (ALLOWED_CHAT, True, bob_panel.ephemeral_message_id)
     assert "id: 3003" in app["session"].addresses[bob_address].text
 
@@ -1005,7 +1013,7 @@ async def test_leaving_form_for_another_command_discards_unfinished_input(app, c
     )
     assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
     sends = [method for method in app["session"].requests if isinstance(method, SendMessage)]
-    assert len(sends) == 1
+    assert len(sends) == 2
 
 
 async def test_invalid_manual_dates_are_retried_on_same_panel_before_creation(app):
@@ -1648,8 +1656,8 @@ def panel_clock(monkeypatch):
     return current
 
 
-@pytest.mark.parametrize("elapsed", [599, 600, 601])
-async def test_personal_panel_is_replaced_only_after_ten_minutes(app, panel_clock, elapsed):
+@pytest.mark.parametrize("elapsed", [0, 599, 600, 601])
+async def test_each_command_replaces_personal_panel_regardless_of_age(app, panel_clock, elapsed):
     from datetime import timedelta
 
     await send(app, "/me", ALICE)
@@ -1657,15 +1665,15 @@ async def test_personal_panel_is_replaced_only_after_ten_minutes(app, panel_cloc
     panel_clock[0] += timedelta(seconds=elapsed)
     await send(app, "/hack", ALICE)
     current = private_panel(app)
-    assert (current.ephemeral_message_id != original.ephemeral_message_id) == (elapsed > 600)
+    assert current.ephemeral_message_id != original.ephemeral_message_id
     await send(app, "/me", ALICE)
-    assert private_panel(app).ephemeral_message_id == current.ephemeral_message_id
+    assert private_panel(app).ephemeral_message_id != current.ephemeral_message_id
     sent = [r for r in app["session"].requests if isinstance(r, SendMessage)]
-    assert len(sent) == (2 if elapsed > 600 else 1)
+    assert len(sent) == 3
     assert all(r.ephemeral_message_parameters.receiver_user_id == USER_ID for r in sent)
 
 
-async def test_panel_age_is_not_extended_by_edits_and_form_continues_on_new_panel(app, panel_clock):
+async def test_interactive_form_keeps_current_panel_even_after_ten_minutes(app, panel_clock):
     from datetime import timedelta
 
     await send(app, "/hack", ALICE)
@@ -1676,7 +1684,7 @@ async def test_panel_age_is_not_extended_by_edits_and_form_continues_on_new_pane
     panel_clock[0] += timedelta(seconds=61)
     await answer_form(app, "Новая панель")
     current = private_panel(app)
-    assert current.ephemeral_message_id != initial.ephemeral_message_id
+    assert current.ephemeral_message_id == initial.ephemeral_message_id
     assert "Конец регистрации" in current.text
     session = await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)
     assert session.data["_prompt_id"] == current.ephemeral_message_id
@@ -1685,7 +1693,7 @@ async def test_panel_age_is_not_extended_by_edits_and_form_continues_on_new_pane
     assert private_panel(app).ephemeral_message_id == current.ephemeral_message_id
 
 
-async def test_expired_callback_panel_is_not_reused_after_cache_loss(app, panel_clock):
+async def test_callback_reuses_available_panel_after_cache_loss_regardless_of_age(app, panel_clock):
     from datetime import timedelta
 
     from bot.respond import _PANELS
@@ -1696,7 +1704,7 @@ async def test_expired_callback_panel_is_not_reused_after_cache_loss(app, panel_
     panel_clock[0] += timedelta(seconds=601)
     await click(app, "Мои задачи")
     current = private_panel(app)
-    assert current.ephemeral_message_id != initial.ephemeral_message_id
+    assert current.ephemeral_message_id == initial.ephemeral_message_id
     latest = next(r for r in reversed(app["session"].requests) if isinstance(r, SendMessage))
     assert latest.ephemeral_message_parameters.receiver_user_id == USER_ID
     assert not latest.ephemeral_message_parameters.replace_callback_query_message
@@ -1704,7 +1712,7 @@ async def test_expired_callback_panel_is_not_reused_after_cache_loss(app, panel_
     assert private_panel(app).ephemeral_message_id == current.ephemeral_message_id
 
 
-async def test_expired_panel_rotates_once_under_concurrent_actions_and_keeps_other_users_panel(
+async def test_concurrent_commands_send_separate_replies_and_leave_other_users_panel_unchanged(
     app, panel_clock
 ):
     import asyncio
@@ -1719,8 +1727,57 @@ async def test_expired_panel_rotates_once_under_concurrent_actions_and_keeps_oth
     panel_clock[0] += timedelta(seconds=541)
     await asyncio.gather(send(app, "/help", ALICE), send(app, "/me", ALICE))
     assert private_panel(app).ephemeral_message_id != initial.ephemeral_message_id
-    await send(app, "/me", bob)
+    await click(app, "Мои задачи", bob)
     assert private_panel(app, bob).ephemeral_message_id == bobs_panel.ephemeral_message_id
     sends = [r for r in app["session"].requests if isinstance(r, SendMessage)]
-    assert len(sends) == 3
+    assert len(sends) == 4
     assert all(r.ephemeral_message_parameters for r in sends)
+
+
+async def test_each_participant_receives_only_their_command_panels_and_interactive_edits(app):
+    actors = [ALICE, tg_user(3003, "bob_tg"), tg_user(4004, "carol_tg")]
+    panels = {}
+    for actor in actors:
+        for command in ("/help", "/hack", "/github", "/me"):
+            before = len(app["session"].requests)
+            await send(app, command, actor, ephemeral=True)
+            requests = app["session"].requests[before:]
+            messages = [r for r in requests if isinstance(r, SendMessage)]
+            assert len(messages) == 1
+            assert messages[0].chat_id == ALLOWED_CHAT
+            assert messages[0].ephemeral_message_parameters.receiver_user_id == actor.id
+            assert not any(
+                isinstance(r, (EditMessageText, EditEphemeralMessageText)) for r in requests
+            )
+        panels[actor.id] = private_panel(app, actor)
+    assert len({p.ephemeral_message_id for p in panels.values()}) == len(actors)
+    for actor in reversed(actors):
+        before = len(app["session"].requests)
+        await click(app, "Мои задачи", actor)
+        await click(app, "К профилю", actor)
+        requests = app["session"].requests[before:]
+        assert not any(isinstance(r, SendMessage) for r in requests)
+        edits = [r for r in requests if isinstance(r, EditEphemeralMessageText)]
+        assert len(edits) == 2
+        assert all(r.receiver_user_id == actor.id for r in edits)
+        assert all(r.ephemeral_message_id == panels[actor.id].ephemeral_message_id for r in edits)
+    for actor in actors:
+        for other in actors:
+            if other.id != actor.id:
+                assert f"id: {other.id}" not in private_panel(app, actor).text
+
+
+async def test_repeated_same_command_and_mention_without_entities_always_send_new_panel(app):
+    await send(app, "/me", ALICE)
+    first = private_panel(app)
+    await send(app, "/me", ALICE)
+    second = private_panel(app)
+    await send(app, "/me@hacks_bot", ALICE, entities=[])
+    third = private_panel(app)
+    assert (
+        len({first.ephemeral_message_id, second.ephemeral_message_id, third.ephemeral_message_id})
+        == 3
+    )
+    sends = [r for r in app["session"].requests if isinstance(r, SendMessage)]
+    assert len(sends) == 3
+    assert all(r.ephemeral_message_parameters.receiver_user_id == USER_ID for r in sends)
