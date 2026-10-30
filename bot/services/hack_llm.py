@@ -22,6 +22,33 @@ from bot.services.llm_http import bounded_json
 log = logging.getLogger(__name__)
 
 
+class LLMRefusal(UserError):
+    """A provider refusal must not trigger another extraction or audit request."""
+
+
+def completed_message(choice: dict[str, Any], expected: str, provider: str) -> dict[str, Any]:
+    reason = choice["finish_reason"]
+    message = choice.get("message")
+    if reason in {"blacklist", "content_filter"} or (
+        isinstance(message, dict) and message.get("refusal")
+    ):
+        log.warning("Hackathon LLM refused document (provider=%s)", provider)
+        name = "GigaChat" if provider == "gigachat" else "Провайдер LLM"
+        raise LLMRefusal(
+            f"{name} отказался обрабатывать документ (фильтр содержимого). "
+            "Сохранён результат обычного парсера для ручного дозаполнения"
+        )
+    if reason == "length":
+        log.warning("Hackathon LLM response truncated (provider=%s)", provider)
+        raise UserError(
+            "Модель не закончила ответ: достигнут лимит длины. "
+            "Сохранён результат обычного парсера для дозаполнения"
+        )
+    if reason != expected:
+        raise ValueError("Incomplete response")
+    return choice["message"]
+
+
 class Checkpoint(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     title: str = Field(min_length=1, max_length=80)
@@ -153,6 +180,9 @@ Dates must be ISO 8601 with timezone; use the supplied chat timezone when omitte
 If a date has no time, use 00:00 for start/checkpoints and 23:59 for deadlines/end.
 Use a year only when explicitly stated or unambiguously established elsewhere in the source.
 registration_end is the participant registration deadline, not the solution submission deadline.
+start_at is the competition opening or the start of task work, not registration/application opening.
+An overall event period may include registration: in that case prefer the explicitly scheduled
+competition opening/work date. An approval/signature date is not an event date.
 Do not mistake deadlines for customers submitting tasks or challenge proposals for participant
 registration. current is an unverified candidate, NEVER source evidence. When review_issues is
 nonempty, re-read post/page/previous_pages to audit the dates. registration_end must be no later
@@ -399,11 +429,8 @@ class HackathonLLM:
                         },
                     )
                     choice = payload["choices"][0]
-                    call = choice["message"]["function_call"]
-                    if (
-                        choice["finish_reason"] != "function_call"
-                        or call["name"] != "extract_hackathon"
-                    ):
+                    call = completed_message(choice, "function_call", provider)["function_call"]
+                    if call["name"] != "extract_hackathon":
                         raise ValueError("Incomplete function response")
                     arguments = call["arguments"]
                     result = schema.model_validate_json(
@@ -430,9 +457,8 @@ class HackathonLLM:
                         self._client, "POST", "chat/completions", json=request
                     )
                     choice = payload["choices"][0]
-                    if choice["finish_reason"] != "stop":
-                        raise ValueError("Incomplete response")
-                    result = schema.model_validate_json(choice["message"]["content"])
+                    message = completed_message(choice, "stop", provider)
+                    result = schema.model_validate_json(message["content"])
                 if isinstance(result, DateReview):
                     sources = {None: context["post"]}
                     for page in [context["page"], *context["previous_pages"]]:
@@ -468,27 +494,63 @@ class HackathonLLM:
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             log.warning("Hackathon LLM HTTP %s (provider=%s, model=%s)", status, provider, model)
+            reason = {
+                400: "API отклонил формат запроса или выбранную модель",
+                401: "Не удалось авторизоваться у провайдера",
+                402: "Недостаточно средств у провайдера",
+                403: "Нет доступа к модели; проверьте права ключа и scope",
+                404: "Модель или адрес API не найдены",
+                429: "Превышен лимит запросов к провайдеру; попробуйте позже",
+            }.get(status, "Провайдер временно недоступен" if status >= 500 else "Ошибка API")
             raise UserError(
-                f"LLM API вернул HTTP {status}. Сохранён результат обычного парсера; "
-                "проверьте ключ, лимиты и поддержку модели"
+                f"LLM API вернул HTTP {status}. {reason}. "
+                "Сохранён результат обычного парсера для дозаполнения"
+            ) from None
+        except httpx.ConnectError:
+            log.warning("Hackathon LLM connection failed (provider=%s, model=%s)", provider, model)
+            raise UserError(
+                "Не удалось подключиться к провайдеру LLM. Проверьте сеть и доверенный "
+                "сертификат провайдера. Сохранён результат обычного парсера для дозаполнения"
+            ) from None
+        except ValidationError as exc:
+            # Only schema field names and error codes are safe to log, never values/quotes.
+            errors = sorted(
+                {
+                    (str(item["loc"][0]), item["type"])
+                    for item in exc.errors(
+                        include_input=False, include_context=False, include_url=False
+                    )
+                    if item["loc"] and item["loc"][0] in schema.model_fields
+                }
+            )
+            log.warning(
+                "Hackathon LLM schema error (provider=%s, model=%s, fields=%s)",
+                provider,
+                model,
+                errors,
+            )
+            raise UserError(
+                "Ответ модели не прошёл проверку данных. "
+                "Сохранён результат обычного парсера для дозаполнения"
             ) from None
         except (
             httpx.HTTPError,
             ValueError,
-            ValidationError,
             KeyError,
             IndexError,
             TypeError,
             OverflowError,
             RecursionError,
-        ):
+        ) as exc:
             log.warning(
-                "Hackathon LLM returned no usable extraction (provider=%s, model=%s)",
+                "Hackathon LLM returned no usable extraction "
+                "(provider=%s, model=%s, error_type=%s)",
                 provider,
                 model,
+                type(exc).__name__,
             )
             # Provider bodies/prompts/headers may contain secrets: never log or show them.
             raise UserError(
-                "LLM не смогла заполнить данные. Сохранён результат обычного парсера; "
-                "проверьте настройки API и попробуйте импорт ещё раз"
+                "Ответ модели имеет неполный или неподдерживаемый формат. "
+                "Сохранён результат обычного парсера для дозаполнения"
             ) from None

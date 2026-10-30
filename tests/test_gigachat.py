@@ -181,6 +181,8 @@ async def test_function_extraction_and_provider_credentials_stay_separate():
             ]
         },
         {"choices": []},
+        {"choices": [None]},
+        {"choices": [{"finish_reason": "blacklist", "message": {"content": "secret"}}]},
         {"choices": [{"finish_reason": "stop", "message": {"content": "refused"}}]},
     ],
 )
@@ -261,5 +263,160 @@ async def test_catalog_size_is_bounded_and_failure_is_not_cached():
         with pytest.raises(UserError, match="Не удалось загрузить"):
             await llm.available_models("gigachat")
         assert await llm.available_models("gigachat") == ["GigaChat", "GigaChat-Pro"]
+    finally:
+        await llm.close()
+
+
+@pytest.mark.parametrize("stage", ["oauth", "api"])
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (400, "формат"),
+        (401, "авторизоваться"),
+        (403, "доступа"),
+        (404, "не найдены"),
+        (429, "лимит"),
+        (500, "недоступен"),
+    ],
+)
+async def test_gigachat_http_errors_explain_failure_without_provider_secrets(
+    stage, status, reason, caplog
+):
+    def handler(request):
+        if str(request.url) == AUTH_URL and stage != "oauth":
+            return auth()
+        return httpx.Response(status, text="credentials-secret access-secret")
+
+    llm = HackathonLLM(
+        None,
+        "unused",
+        "https://openrouter.ai/api/v1",
+        default_provider="gigachat",
+        gigachat_credentials="credentials-secret",
+        gigachat_transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(UserError, match=reason) as error:
+            await llm.extract("post", "", None, TZ)
+        assert f"HTTP {status}" in error.value.message
+        assert "secret" not in error.value.message + caplog.text
+    finally:
+        await llm.close()
+
+
+@pytest.mark.parametrize("stage", ["oauth", "api"])
+@pytest.mark.parametrize(
+    ("failure", "explanation"),
+    [(httpx.ConnectError, "сертификат"), (httpx.ReadTimeout, "две минуты")],
+)
+async def test_gigachat_transport_errors_are_distinguished(stage, failure, explanation, caplog):
+    def handler(request):
+        if str(request.url) == AUTH_URL and stage != "oauth":
+            return auth()
+        raise failure("credentials-secret access-secret", request=request)
+
+    llm = HackathonLLM(
+        None,
+        "unused",
+        "https://openrouter.ai/api/v1",
+        default_provider="gigachat",
+        gigachat_credentials="credentials-secret",
+        gigachat_transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(UserError, match=explanation) as error:
+            await llm.extract("post", "", None, TZ)
+        assert "secret" not in error.value.message + caplog.text
+    finally:
+        await llm.close()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"access_token": None, "expires_at": 0},
+        {"access_token": "access-secret", "expires_at": "Infinity"},
+        {"access_token": "access-secret", "expires_at": 1},
+        {"access_token": "access-secret\n", "expires_at": (time() + 1800) * 1000},
+    ],
+)
+async def test_invalid_oauth_payloads_never_cache_a_token(payload):
+    client = GigaChatClient(
+        "credentials-secret",
+        "GIGACHAT_API_PERS",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)),
+    )
+    try:
+        with pytest.raises((KeyError, TypeError, ValueError)):
+            await client.token()
+        assert client._token is None
+    finally:
+        await client.close()
+
+
+async def test_concurrent_unauthorized_requests_refresh_oauth_only_once():
+    auth_calls = 0
+    failed_requests = 0
+    all_failed = asyncio.Event()
+
+    async def handler(request):
+        nonlocal auth_calls, failed_requests
+        if str(request.url) == AUTH_URL:
+            auth_calls += 1
+            await asyncio.sleep(0)
+            return auth(f"access-{auth_calls}")
+        if request.headers["Authorization"] == "Bearer access-1":
+            failed_requests += 1
+            if failed_requests == 3:
+                all_failed.set()
+            await all_failed.wait()
+            return httpx.Response(401)
+        assert request.headers["Authorization"] == "Bearer access-2"
+        return httpx.Response(200, json={"data": []})
+
+    client = GigaChatClient(
+        "credentials-secret", "GIGACHAT_API_PERS", transport=httpx.MockTransport(handler)
+    )
+    try:
+        async with asyncio.timeout(2):
+            await asyncio.gather(*(client.request("GET", "models") for _ in range(3)))
+        assert auth_calls == 2 and failed_requests == 3
+    finally:
+        await client.close()
+
+
+async def test_schema_diagnostics_log_field_and_code_without_values(caplog):
+    payload = {
+        "choices": [
+            {
+                "finish_reason": "function_call",
+                "message": {
+                    "function_call": {
+                        "name": "extract_hackathon",
+                        "arguments": fields(title={"secret": "access-secret"}),
+                    }
+                },
+            }
+        ]
+    }
+    llm = HackathonLLM(
+        None,
+        "unused",
+        "https://openrouter.ai/api/v1",
+        default_provider="gigachat",
+        gigachat_credentials="credentials-secret",
+        gigachat_transport=httpx.MockTransport(
+            lambda request: (
+                auth() if str(request.url) == AUTH_URL else httpx.Response(200, json=payload)
+            )
+        ),
+    )
+    try:
+        with pytest.raises(UserError, match="проверку данных") as error:
+            await llm.extract("post", "", None, TZ)
+        assert "schema error" in caplog.text and "title" in caplog.text
+        assert "string_type" in caplog.text
+        assert "secret" not in error.value.message + caplog.text
     finally:
         await llm.close()

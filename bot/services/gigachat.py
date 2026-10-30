@@ -64,7 +64,12 @@ class GigaChatClient:
             )
             token = result["access_token"]
             expires_at = float(result["expires_at"]) / 1000
-            if not isinstance(token, str) or not token or not math.isfinite(expires_at):
+            if (
+                not isinstance(token, str)
+                or not token
+                or any(not 33 <= ord(char) <= 126 for char in token)
+                or not math.isfinite(expires_at)
+            ):
                 raise ValueError("Invalid OAuth response")
             if expires_at <= time():
                 raise ValueError("Expired OAuth token")

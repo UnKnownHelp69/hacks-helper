@@ -14,7 +14,7 @@ from bot.db.models import Hackathon, HackSession
 from bot.db.repositories import Storage
 from bot.errors import UserError
 from bot.services.github import GitHubClient
-from bot.services.hack_data import DATE_FIELDS, import_date_issues, validate_hack
+from bot.services.hack_data import DATE_FIELDS, REQUIRED_FIELDS, import_date_issues, validate_hack
 from bot.services.hack_import import (
     HACK_RE,
     URL_RE,
@@ -25,7 +25,7 @@ from bot.services.hack_import import (
     public_url,
     regulation_links,
 )
-from bot.services.hack_llm import HackathonLLM, page_context
+from bot.services.hack_llm import HackathonLLM, LLMRefusal, page_context
 from bot.services.reminders import chat_zone
 from bot.services.users import UserDirectory
 
@@ -152,23 +152,47 @@ class HackathonService:
         *,
         explicit: bool = False,
         on_progress: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
-    ) -> Hackathon | None:
+    ) -> Hackathon | HackSession | None:
         data = await self.extract_import(
             chat_id, user_id, text, explicit=explicit, on_progress=on_progress
         )
         if data is None:
             return None
+        uncertain_dates = import_date_issues(data) or (
+            any(data.get(key) for key in DATE_FIELDS)
+            and (data.get("llm_imported") or data.get("llm_provider"))
+            and not data.get("dates_reviewed")
+        )
+        if uncertain_dates:
+            for key in DATE_FIELDS:
+                data[key] = None
+            data["import_error"] = " ".join(
+                filter(
+                    None,
+                    [
+                        data.get("import_error"),
+                        "Даты не подтверждены или противоречат друг другу. Укажите их вручную.",
+                    ],
+                )
+            )
         try:
             validate_hack(data)
-            if data.get("llm_imported") and not data.get("dates_reviewed"):
-                raise UserError("Не удалось перепроверить даты из документов")
         except UserError as exc:
-            details = data.get("import_error")
-            raise UserError(
-                "Хакатон не создан. "
-                + exc.message.replace("Заполните поля:", "Не найдены данные:")
-                + ("\n" + details if details else "")
-            ) from None
+            if not data.get("regulations_import") and not any(
+                data.get(key) for key in REQUIRED_FIELDS
+            ):
+                raise UserError(
+                    "Хакатон не создан. " + (data.get("import_error") or exc.message)
+                ) from None
+            missing = next((key for key in REQUIRED_FIELDS if not data.get(key)), None)
+            if missing is None:
+                data["import_error"] = " ".join(
+                    filter(None, [data.get("import_error"), exc.message])
+                )
+            field = missing or "end_at"
+            data.update(_mode="create", _import_completion=True)
+            await self.storage.workflow.clear_forms(user_id, chat_id)
+            return await self.storage.workflow.new_session(user_id, chat_id, f"form:{field}", data)
         return await self.create(chat_id, user_id, data)
 
     async def extract_import(
@@ -339,6 +363,7 @@ class HackathonService:
                     data["llm_provider"], data["llm_model"] = selection
                     await report("Нейросеть извлекает данные из положения / регламента")
                     html, document_url = documents[0]
+                    refused = False
                     try:
                         result = await self.llm.extract(
                             "",
@@ -349,11 +374,16 @@ class HackathonService:
                             current=data,
                             selection=selection,
                         )
+                    except LLMRefusal as exc:
+                        warning(exc.message)
+                        refused = True
                     except UserError as exc:
                         warning(exc.message)
                     else:
                         merge(result, llm=True)
                         await report("Данные из документов найдены")
+                    # Even a rejected extraction must not skip auditing parser dates.
+                    if not refused:
                         await audit_dates()
         except TimeoutError:
             warning("Обработка заняла две минуты и завершена.")

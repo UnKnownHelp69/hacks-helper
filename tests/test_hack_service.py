@@ -71,11 +71,14 @@ async def test_editing_existing_hack_does_not_depend_on_unchanged_github_repo(
     get_repo.assert_not_awaited()
 
 
-async def test_incomplete_import_creates_neither_hackathon_nor_saved_form(service, storage):
-    with pytest.raises(UserError, match="Хакатон не создан"):
-        await service.import_post(ALLOWED_CHAT, USER_ID, "Хакатон: начало 5 ноября 2026 в 10:00")
+async def test_incomplete_import_opens_creation_input_without_publishing(service, storage):
+    session = await service.import_post(
+        ALLOWED_CHAT, USER_ID, "Хакатон: начало 5 ноября 2026 в 10:00"
+    )
+    assert session.step == "form:registration_end" and session.data["_mode"] == "create"
+    assert session.data["start_at"] == "2026-11-05T07:00:00+00:00"
     assert await storage.hackathons.list(ALLOWED_CHAT) == []
-    assert await storage.workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is None
+    assert not await storage.workflow.dirty_publications()
 
 
 async def test_failed_site_import_does_not_save_partial_data(service, storage, monkeypatch):
@@ -223,7 +226,7 @@ async def test_automatic_ctf_import_reads_regulations_and_keeps_unknown_dates_em
     root = "https://лигацтф.рус/"
     pdf = "https://лк.лигацтф.рус/storage/docs/regulation.pdf"
     pages[root] = (
-        '<h1>Лига ЦТФ</h1><p>Начало 05.11.2099</p><p>Команды от 80 до 90 человек</p>'
+        "<h1>Лига ЦТФ</h1><p>Начало 05.11.2099</p><p>Команды от 80 до 90 человек</p>"
         f'<a href="{pdf}">Положение о Лиге</a>'
     )
     pages[pdf] = "<pre>Положение о Лиге ЦТФ. Общие положения. Команда от 2 до 8 человек</pre>"
@@ -237,10 +240,10 @@ async def test_automatic_ctf_import_reads_regulations_and_keeps_unknown_dates_em
     extract.assert_awaited_once()
     assert "2099" not in str(extract.await_args)
     assert [call.args[0] for call in fetch.await_args_list] == [root, pdf]
-    with pytest.raises(UserError, match="Хакатон не создан"):
-        await service.import_post(ALLOWED_CHAT, USER_ID, root)
+    form = await service.import_post(ALLOWED_CHAT, USER_ID, root)
+    assert form.step == "form:registration_end" and form.data["team_max"] == 8
     assert await storage.hackathons.list(ALLOWED_CHAT) == []
-    assert await storage.workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is None
+    assert not await storage.workflow.dirty_publications()
 
 
 async def test_llm_failure_preserves_document_parser_facts(service, import_pages, monkeypatch):
@@ -251,8 +254,9 @@ async def test_llm_failure_preserves_document_parser_facts(service, import_pages
     monkeypatch.setattr(service.llm, "extract", extract)
     session = await service.extract_import(ALLOWED_CHAT, USER_ID, ROOT)
     assert session["start_at"] == "2026-11-05T07:00:00+00:00"
-    assert session["import_error"] == "LLM сбой"
-    extract.assert_awaited_once()
+    assert "LLM сбой" in session["import_error"]
+    assert "перепроверить даты" in session["import_error"]
+    assert extract.await_count == 2
 
 
 async def test_personal_model_is_snapshotted_for_extraction_and_audit(
@@ -440,7 +444,50 @@ async def test_import_with_failed_date_review_cannot_create_automatically(
         "llm_imported": True,
     }
     monkeypatch.setattr(service, "extract_import", AsyncMock(return_value=data))
-    with pytest.raises(UserError, match="перепроверить даты"):
-        await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
+    session = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
+    assert session.step == "form:registration_end"
+    assert not any(session.data.get(key) for key in ("registration_end", "start_at", "end_at"))
+    assert session.data["team_max"] == 5
     assert await storage.hackathons.list(ALLOWED_CHAT) == []
-    assert await storage.workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is None
+
+
+async def test_conflicting_parser_dates_after_llm_failure_are_left_empty_for_completion(
+    service, storage, import_pages, monkeypatch
+):
+    pages, _ = import_pages
+    pages[RULES] += (
+        "<p>Регистрация до 06.12.2026 23:59</p><p>Начало 05.12.2026 10:00</p>"
+        "<p>Конец 07.12.2026 18:00</p>"
+    )
+    service.llm.configured = True
+    extract = AsyncMock(side_effect=UserError("Ответ модели не прошёл проверку данных"))
+    monkeypatch.setattr(service.llm, "extract", extract)
+    form = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
+    assert extract.await_count == 2
+    assert form.step == "form:registration_end" and form.data["team_max"] == 5
+    assert form.data["site_url"] == ROOT
+    assert all(form.data.get(key) is None for key in ("registration_end", "start_at", "end_at"))
+    assert "Даты не подтверждены" in form.data["import_error"]
+    assert await storage.hackathons.list(ALLOWED_CHAT) == []
+    assert not await storage.workflow.dirty_publications()
+
+
+async def test_provider_refusal_is_not_retried_and_opens_private_completion(
+    service, storage, import_pages, monkeypatch
+):
+    from bot.services.hack_llm import LLMRefusal
+
+    pages, _ = import_pages
+    pages[RULES] += (
+        "<p>Регистрация до 01.12.2026 23:59</p><p>Начало 05.12.2026 10:00</p>"
+        "<p>Конец 07.12.2026 18:00</p>"
+    )
+    service.llm.configured = True
+    extract = AsyncMock(side_effect=LLMRefusal("GigaChat отказался обрабатывать документ"))
+    monkeypatch.setattr(service.llm, "extract", extract)
+    form = await service.import_post(ALLOWED_CHAT, USER_ID, ROOT)
+    extract.assert_awaited_once()
+    assert form.data["team_max"] == 5 and form.data["spec_url"] == RULES
+    assert "отказался" in form.data["import_error"]
+    assert form.step == "form:registration_end" and form.data["registration_end"] is None
+    assert not await storage.hackathons.list(ALLOWED_CHAT)

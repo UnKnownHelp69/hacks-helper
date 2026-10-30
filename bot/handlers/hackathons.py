@@ -141,6 +141,9 @@ async def import_message(
                 explicit=explicit,
                 on_progress=progress.update,
             )
+        if isinstance(hack, HackSession):
+            await prompt(message, ctx, hack, hack.step.split(":", 1)[1])
+            return True
         if hack is not None:
             await creation_result(message, ctx, hack.id)
             return True
@@ -180,11 +183,26 @@ async def prompt(
             text += "\nЗнак «-» — очистить поле."
     if error:
         text = f"❌ {error}\n\n" + text
+    rows = []
+    if session.data.get("_import_completion"):
+        tz = await ctx.zone(session.chat_id)
+        lines = ["📝 <b>Заполните недостающие данные</b>"]
+        for key, label in FIELD_LABELS.items():
+            value = session.data.get(key)
+            if key in DATE_FIELDS and value:
+                value = format_dt(datetime.fromisoformat(value), tz)
+            lines.append(f"<b>{label}:</b> {escape(str(value)[:140]) if value else '—'}")
+        if session.data.get("import_error"):
+            lines.append(escape(session.data["import_error"][:600]))
+        text = "\n".join(lines) + "\n\n" + text
+        text += "\nПосле заполнения обязательных полей хакатон создастся автоматически."
+        rows.append([button(session, "Изменить данные", "creation_fields")])
     text += "\nОтветьте на это личное сообщение. «Отмена» — прекратить ввод."
+    rows.append([button(session, "Отмена", "cancel")])
     sent = await personal_reply(
         event,
         text,
-        reply_markup=keyboard([[button(session, "Отмена", "cancel")]]),
+        reply_markup=keyboard(rows),
     )
     if isinstance(sent, Message):
         prompt_id = (
@@ -382,9 +400,23 @@ async def callback_hack(callback: CallbackQuery, ctx: AppContext) -> None:
             )
             await prompt(callback, ctx, session, "title" if action == "manual" else "import")
         elif action == "field":
-            if argument not in FIELD_LABELS or not session.data.get("editing_id"):
+            if argument not in FIELD_LABELS or not (
+                session.data.get("editing_id") or session.data.get("_import_completion")
+            ):
                 raise UserError("Откройте настройки существующего хакатона")
             await prompt(callback, ctx, session, argument)
+        elif action == "creation_fields":
+            if not session.data.get("_import_completion") or session.data.get("_mode") != "create":
+                raise UserError("Откройте /hack")
+            fields = list(FIELD_LABELS.items())
+            rows = [
+                [button(session, label, "field", key) for key, label in fields[index : index + 2]]
+                for index in range(0, len(fields), 2)
+            ]
+            rows.append([button(session, "Отмена", "cancel")])
+            await personal_reply(
+                callback, "Выберите поле для изменения.", reply_markup=keyboard(rows)
+            )
         elif action == "edit_menu":
             await edit_menu(callback, ctx, session)
         elif action in {"checkpoints", "cpdel"}:

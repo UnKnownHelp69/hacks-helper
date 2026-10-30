@@ -729,11 +729,73 @@ async def test_votes_team_choices_and_duplicate_new_team_click(app):
     )
 
 
-async def test_failed_import_has_no_saved_form_and_legacy_publish_is_disabled(app):
+async def test_incomplete_import_opens_input_and_cancel_discards_it_without_a_draft(app):
     await send(app, "Хакатон без дат", ALICE)
-    assert "Хакатон не создан" in app["session"].last_text()
-    assert await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is None
+    assert "Заполните недостающие данные" in app["session"].last_text()
+    assert "<b>Начало:</b> —" in app["session"].last_text()
+    assert "черновик" not in app["session"].last_text().lower()
+    assert (await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)).step == (
+        "form:registration_end"
+    )
+    await click(app, "Отмена")
+    assert (await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)).step == "menu"
     assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
+
+
+async def test_partial_link_import_keeps_found_fields_and_finishes_in_same_private_panel(
+    app, monkeypatch
+):
+    async def fetch(url):
+        if url.endswith("/rules"):
+            return (
+                "<h1>Положение о проведении хакатона</h1>"
+                "<p>Начало 05.12.2026 10:00</p><p>Конец 07.12.2026 18:00</p>"
+                "<p>Команда от 2 до 4 человек</p>",
+                url,
+            )
+        return '<h1>Хакатон</h1><a href="/rules">Положение</a>', url
+
+    monkeypatch.setattr("bot.services.hackathons.fetch_public_page", fetch)
+    await send(app, "https://hack.example/event", ALICE)
+    panel = private_panel(app)
+    assert "<b>Конец регистрации:</b> —" in panel.text
+    assert "<b>Максимум в команде:</b> 4" in panel.text
+    assert "<b>Сайт:</b> https://hack.example/event" in panel.text
+    assert "черновик" not in panel.text.lower()
+    assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
+    assert not any(
+        isinstance(method, SendMessage) and not method.ephemeral_message_parameters
+        for method in app["session"].requests
+    )
+    await click(app, "Изменить данные")
+    await click(app, "Название")
+    await answer_form(app, "Исправленное название")
+    await send(app, "01.12.2026 23:59", ALICE)  # Public messages do not fill a personal form.
+    assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []
+    await answer_form(app, "01.12.2026 23:59")
+    hack = (await app["storage"].hackathons.list(ALLOWED_CHAT))[0]
+    assert hack.title == "Исправленное название" and hack.team_max == 4
+    assert hack.start_at == datetime(2026, 12, 5, 7, tzinfo=UTC)
+    assert hack.repo is None and hack.org_chat_url is None
+    assert private_panel(app).ephemeral_message_id == panel.ephemeral_message_id
+    forms = await app["storage"].db.fetchall("SELECT * FROM hack_sessions WHERE step LIKE 'form:%'")
+    assert forms == []
+    personal = [
+        method
+        for method in app["session"].requests
+        if isinstance(method, SendMessage) and method.ephemeral_message_parameters
+    ]
+    public = [
+        method
+        for method in app["session"].requests
+        if isinstance(method, SendMessage) and not method.ephemeral_message_parameters
+    ]
+    assert len(personal) == len(public) == 1
+    assert personal[0].ephemeral_message_parameters.receiver_user_id == USER_ID
+
+
+async def test_legacy_publish_is_disabled(app):
+    await send(app, "/hack", ALICE)
     session = await app["storage"].workflow.new_session(USER_ID, ALLOWED_CHAT, "preview")
     forged = f"hk:{session.token}:{session.revision}:publish:"
     await press(app, forged, ALICE)
@@ -876,7 +938,9 @@ async def test_import_progress_stays_personal_and_fills_fields_before_completion
         await job
 
 
-async def test_expired_progress_panel_is_replaced_only_with_private_failure(app, monkeypatch):
+async def test_expired_progress_panel_is_replaced_only_with_private_completion_form(
+    app, monkeypatch
+):
     original = app["session"].make_request
 
     async def expired(bot, method, timeout=None):
@@ -887,8 +951,10 @@ async def test_expired_progress_panel_is_replaced_only_with_private_failure(app,
 
     monkeypatch.setattr(app["session"], "make_request", expired)
     await send(app, "Хакатон без дат", ALICE)
-    assert "Хакатон не создан" in app["session"].last_text()
-    assert await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT) is None
+    assert "Заполните недостающие данные" in app["session"].last_text()
+    assert (await app["storage"].workflow.session(USER_ID, chat_id=ALLOWED_CHAT)).step == (
+        "form:registration_end"
+    )
     sends = [method for method in app["session"].requests if isinstance(method, SendMessage)]
     assert sends and all(method.ephemeral_message_parameters for method in sends)
     assert await app["storage"].hackathons.list(ALLOWED_CHAT) == []

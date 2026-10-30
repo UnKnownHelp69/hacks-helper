@@ -454,7 +454,9 @@ def extract_post(text: str, tz: ZoneInfo) -> dict[str, Any]:
             if len(dates) >= 2:
                 result.setdefault("start_at", dates[0])
                 result.setdefault("end_at", dates[-1])
-            elif dates and re.search(r"начало|старт|пройд[её]т|состоится", lower):
+            elif dates and re.search(
+                r"начало|старт|пройд[её]т|состоится|открыти[ея]\s+(?:хакатона|соревнования)", lower
+            ):
                 result["start_at"] = dates[0]
             elif dates and re.search(r"конец|окончани|финиш|завершени", lower):
                 result["end_at"] = dates[0]

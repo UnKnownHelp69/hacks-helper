@@ -74,6 +74,24 @@ def test_ctf_word_fragments_do_not_recognize_unrelated_documents(text):
     assert not extract_page(html, "https://event.example/regulation.pdf", MSK)["is_hackathon"]
 
 
+def test_rusindustrial_competition_opening_is_not_the_overall_registration_period():
+    html = """<pre>ПОЛОЖЕНИЕ О ХАКАТОНЕ
+    «ROS Humanoid Hack»
+    Команда объединение от 1 до 3 Участников
+    Общий срок проведения Хакатона: с 15 октября 2026 по 27 ноября 2026 включительно
+    В период с 15 октября 2026 – 28 октября 2026 – прием заявок и регистрация Участников
+    29 октября 2026 – проведение онлайн открытия Хакатона
+    29 октября 2026 – 11 ноября 2026 – выполнение Участниками Задания онлайн
+    16 ноября 2026 – проведение финального питчинга
+    23 ноября – 27 ноября 2026 – очный перенос созданного кода
+    </pre>"""
+    result = extract_page(html, "https://hackathon.rusindustrial.ai/files/rules.pdf", MSK)
+    assert result["registration_end"] == "2026-10-28T20:59:00+00:00"
+    assert result["start_at"] == "2026-10-28T21:00:00+00:00"
+    assert result["end_at"] == "2026-11-27T20:59:00+00:00"
+    assert result["team_max"] == 3
+
+
 def test_russian_date_range_and_invalid_deep_metadata():
     result = extract_post("Хакатон команды\nПройдёт 3–5 ноября 2026\nКоманды: 2–4 человека", MSK)
     assert result["start_at"] == "2026-11-02T21:00:00+00:00"
